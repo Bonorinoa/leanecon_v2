@@ -5,6 +5,8 @@ __pycache__/
 *.db
 lean_workspace/build/
 lean_workspace/.lake/
+lean_workspace/LeanEcon/checkpoints/
+lean_workspace/LeanEcon/*-*-*-*-*.lean
 .vscode/
 .idea/
 dist/

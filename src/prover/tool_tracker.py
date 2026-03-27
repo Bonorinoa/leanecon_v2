@@ -32,3 +32,14 @@ class BudgetTracker:
             self.total_tool_calls < self.max_total_tool_calls
             and self.search_tool_calls < self.max_search_tool_calls
         )
+
+    def snapshot(self) -> dict[str, int | list[str]]:
+        """Return a serializable snapshot of current budget usage."""
+
+        return {
+            "max_search_tool_calls": self.max_search_tool_calls,
+            "max_total_tool_calls": self.max_total_tool_calls,
+            "search_tool_calls": self.search_tool_calls,
+            "total_tool_calls": self.total_tool_calls,
+            "tool_history": list(self.tool_history),
+        }

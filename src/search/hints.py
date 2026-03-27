@@ -1,4 +1,4 @@
-"""Curated deterministic hint definitions for Phase 2A retrieval."""
+"""Curated deterministic hint definitions for retrieval and formalization."""
 
 from __future__ import annotations
 
@@ -22,25 +22,39 @@ class HintDefinition:
 
 CURATED_HINTS: tuple[HintDefinition, ...] = (
     HintDefinition(
-        name="competitive-equilibrium",
-        description="Claims about equilibrium often depend on market clearing and Pareto tools.",
-        keywords=("equilibrium", "competitive", "walrasian", "market"),
-        candidate_imports=("LeanEcon.Preamble.Equilibrium",),
-        candidate_identifiers=("CompetitiveEquilibrium", "marketClearing", "paretoOptimal"),
+        name="pareto-welfare",
+        description="Welfare claims often reduce to Pareto dominance or Pareto efficiency.",
+        keywords=("pareto", "efficient", "optimal", "welfare"),
+        candidate_imports=("LeanEcon.Preamble.Welfare.ParetoEfficiency",),
+        candidate_identifiers=("pareto_dominates", "pareto_efficient"),
     ),
     HintDefinition(
         name="utility-optimization",
-        description="Optimization claims usually need utility, preference, or argmax-style lemmas.",
-        keywords=("utility", "optimization", "maximize", "maximizes", "argmax"),
-        candidate_imports=("LeanEcon.Preamble.Optimization",),
-        candidate_identifiers=("Utility", "argmax", "isOptimal"),
+        description="Consumer-theory claims often need utility definitions or compactness tools.",
+        keywords=("utility", "optimization", "maximize", "maximizes", "argmax", "consumer"),
+        candidate_imports=(
+            "LeanEcon.Preamble.Consumer.CRRAUtility",
+            "LeanEcon.Preamble.Consumer.CARAUtility",
+            "Mathlib.Topology.Order.Basic",
+        ),
+        candidate_identifiers=("crra_utility", "ContinuousOn", "IsMaxOn"),
     ),
     HintDefinition(
-        name="fixed-point-existence",
-        description="Existence claims may benefit from fixed-point or compactness-related imports.",
-        keywords=("exists", "existence", "fixed", "compact", "continuous"),
-        candidate_imports=("LeanEcon.Preamble.Existence",),
-        candidate_identifiers=("exists_equilibrium", "FixedPoint", "compactSpace"),
+        name="extreme-value",
+        description=(
+            "Existence and optimization claims often use compactness "
+            "and extreme-value lemmas."
+        ),
+        keywords=("exists", "existence", "compact", "continuous", "maximum", "minimum"),
+        candidate_imports=(
+            "LeanEcon.Preamble.Optimization.ExtremeValueTheorem",
+            "Mathlib.Topology.Order.Basic",
+        ),
+        candidate_identifiers=(
+            "continuous_attains_max_on_compact",
+            "continuous_attains_min_on_compact",
+            "IsCompact.exists_isMaxOn",
+        ),
     ),
     HintDefinition(
         name="game-theory",
@@ -49,9 +63,29 @@ CURATED_HINTS: tuple[HintDefinition, ...] = (
             "best responses."
         ),
         keywords=("game", "strategy", "nash", "best", "response"),
-        candidate_imports=("LeanEcon.Preamble.GameTheory",),
-        candidate_identifiers=("NashEquilibrium", "bestResponse", "mixedStrategy"),
+        candidate_imports=("LeanEcon.Preamble.GameTheory.ExpectedPayoff",),
+        candidate_identifiers=("expected_payoff_2x2",),
         domain="game_theory",
+    ),
+    HintDefinition(
+        name="budget-set",
+        description=(
+            "Budget-constraint claims often benefit from the reusable "
+            "budget-set predicate."
+        ),
+        keywords=("budget", "constraint", "bundle", "income", "spending"),
+        candidate_imports=("LeanEcon.Preamble.Consumer.BudgetSet",),
+        candidate_identifiers=("in_budget_set",),
+    ),
+    HintDefinition(
+        name="production",
+        description="Production claims may align with Cobb-Douglas or CES preamble modules.",
+        keywords=("production", "cobb-douglas", "ces", "elasticity", "firm"),
+        candidate_imports=(
+            "LeanEcon.Preamble.Producer.CobbDouglas2Factor",
+            "LeanEcon.Preamble.Producer.CES2Factor",
+        ),
+        candidate_identifiers=("cobb_douglas", "cobb_douglas_elasticity_capital"),
     ),
 )
 

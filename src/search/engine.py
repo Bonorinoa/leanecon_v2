@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from src.config import LEAN_PROOF_DIR, LEAN_WORKSPACE, PREAMBLE_DIR, PROJECT_ROOT
 from src.models import CuratedHint, PreambleMatch, SearchResponse
+from src.preamble_library import (
+    PreambleEntry,
+    build_preamble_block,
+    build_preamble_imports,
+    get_preamble_entries,
+    rank_matching_preambles,
+)
 from src.search.hints import HintDefinition, match_curated_hints
 
 TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_]*")
@@ -21,6 +30,59 @@ DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "finance": ("asset", "pricing", "bond", "portfolio"),
     "economics": ("equilibrium", "utility", "market", "consumer", "producer"),
 }
+
+MAX_AUTO_PREAMBLES = 2
+
+
+@dataclass
+class FormalizationContext:
+    """Structured advisory retrieval context for theorem-stub generation."""
+
+    claim_text: str
+    search_response: SearchResponse
+    explicit_preamble_names: list[str] = field(default_factory=list)
+    auto_preamble_names: list[str] = field(default_factory=list)
+    preamble_names: list[str] = field(default_factory=list)
+    preamble_block: str = ""
+    preamble_imports: list[str] = field(default_factory=list)
+    candidate_imports: list[str] = field(default_factory=list)
+    candidate_identifiers: list[str] = field(default_factory=list)
+    retrieval_notes: list[str] = field(default_factory=list)
+
+    def build_prompt_block(self) -> str:
+        """Render a compact prompt-friendly summary."""
+
+        lines = ["RETRIEVAL CONTEXT (advisory):"]
+        if self.search_response.domain:
+            lines.append(f"- Domain: {self.search_response.domain}")
+        if self.preamble_names:
+            lines.append(f"- Matching preambles: {', '.join(self.preamble_names)}")
+        if self.candidate_imports:
+            lines.append(f"- Candidate imports: {', '.join(self.candidate_imports[:8])}")
+        if self.candidate_identifiers:
+            lines.append(
+                f"- Candidate identifiers: {', '.join(self.candidate_identifiers[:12])}"
+            )
+        if self.retrieval_notes:
+            lines.append(f"- Notes: {' | '.join(self.retrieval_notes[:6])}")
+        return "\n".join(lines)
+
+    def to_search_context(self) -> dict[str, Any]:
+        """Return a JSON-serializable retrieval summary for API responses."""
+
+        return {
+            "domain": self.search_response.domain,
+            "preamble_matches": [
+                match.model_dump() for match in self.search_response.preamble_matches
+            ],
+            "curated_hints": [hint.model_dump() for hint in self.search_response.curated_hints],
+            "explicit_preambles": list(self.explicit_preamble_names),
+            "auto_preambles": list(self.auto_preamble_names),
+            "preamble_names": list(self.preamble_names),
+            "candidate_imports": list(self.candidate_imports),
+            "candidate_identifiers": list(self.candidate_identifiers),
+            "notes": list(self.retrieval_notes),
+        }
 
 
 def _normalize_claim(raw_claim: str) -> str:
@@ -122,6 +184,31 @@ def _match_files(claim_tokens: set[str]) -> tuple[list[PreambleMatch], set[str],
     return matches[:5], candidate_imports, candidate_identifiers
 
 
+def _match_preamble_entries(raw_claim: str) -> tuple[list[PreambleMatch], set[str], set[str]]:
+    """Match claims against the curated preamble library metadata."""
+
+    matches: list[PreambleMatch] = []
+    candidate_imports: set[str] = set()
+    candidate_identifiers: set[str] = set()
+
+    for entry, score in rank_matching_preambles(raw_claim):
+        candidate_imports.add(entry.lean_module)
+        path = entry.lean_path
+        if path.exists():
+            contents = path.read_text(encoding="utf-8", errors="ignore")
+            candidate_identifiers.update(_extract_identifiers(contents))
+        matches.append(
+            PreambleMatch(
+                name=entry.name,
+                path=_relative_path(path),
+                score=float(score),
+                reason=f"Matched preamble keywords for {entry.description}",
+            )
+        )
+
+    return matches, candidate_imports, candidate_identifiers
+
+
 def _build_hint_models(
     hints: Iterable[HintDefinition], claim_tokens: set[str]
 ) -> list[CuratedHint]:
@@ -151,17 +238,32 @@ def search_claim(raw_claim: str, domain: str = "economics") -> SearchResponse:
 
     hints = match_curated_hints(normalized_claim, resolved_domain)
     hint_models = _build_hint_models(hints, claim_tokens)
-    preamble_matches, file_imports, file_identifiers = _match_files(claim_tokens)
+    entry_matches, entry_imports, entry_identifiers = _match_preamble_entries(raw_claim)
+    file_matches, file_imports, file_identifiers = _match_files(claim_tokens)
+
+    seen_match_names: set[str] = set()
+    preamble_matches: list[PreambleMatch] = []
+    for match in sorted(
+        entry_matches + file_matches,
+        key=lambda item: (-item.score, item.name),
+    ):
+        dedupe_key = f"{match.name}:{match.path}"
+        if dedupe_key in seen_match_names:
+            continue
+        seen_match_names.add(dedupe_key)
+        preamble_matches.append(match)
+        if len(preamble_matches) >= 5:
+            break
 
     candidate_imports = sorted(
-        file_imports.union(
+        entry_imports.union(file_imports).union(
             import_name
             for hint in hint_models
             for import_name in hint.candidate_imports
         )
     )
     candidate_identifiers = sorted(
-        file_identifiers.union(
+        entry_identifiers.union(file_identifiers).union(
             identifier
             for hint in hint_models
             for identifier in hint.candidate_identifiers
@@ -174,4 +276,51 @@ def search_claim(raw_claim: str, domain: str = "economics") -> SearchResponse:
         domain=resolved_domain,
         candidate_imports=candidate_imports,
         candidate_identifiers=candidate_identifiers,
+    )
+
+
+def build_formalization_context(
+    raw_claim: str,
+    explicit_preamble_names: list[str] | None = None,
+) -> FormalizationContext:
+    """Build bounded retrieval context for the formalizer."""
+
+    explicit_entries = get_preamble_entries(explicit_preamble_names or [])
+    explicit_names = [entry.name for entry in explicit_entries]
+
+    auto_names: list[str] = []
+    if not explicit_names:
+        auto_names = [
+            entry.name
+            for entry, _score in rank_matching_preambles(raw_claim, auto=True)[
+                :MAX_AUTO_PREAMBLES
+            ]
+        ]
+
+    selected_entries: list[PreambleEntry] = explicit_entries or get_preamble_entries(auto_names)
+    search_response = search_claim(raw_claim)
+    preamble_imports = build_preamble_imports(selected_entries)
+    candidate_imports = sorted(
+        set(search_response.candidate_imports).union(
+            entry.lean_module for entry in selected_entries
+        )
+    )
+    candidate_identifiers = list(search_response.candidate_identifiers)
+    retrieval_notes = [hint.description for hint in search_response.curated_hints]
+    if explicit_names:
+        retrieval_notes.insert(0, "Caller supplied explicit preamble names.")
+    elif auto_names:
+        retrieval_notes.insert(0, "Auto-selected preambles from deterministic keyword matching.")
+
+    return FormalizationContext(
+        claim_text=raw_claim,
+        search_response=search_response,
+        explicit_preamble_names=explicit_names,
+        auto_preamble_names=[] if explicit_names else auto_names,
+        preamble_names=[entry.name for entry in selected_entries],
+        preamble_block=build_preamble_block(selected_entries),
+        preamble_imports=preamble_imports,
+        candidate_imports=candidate_imports,
+        candidate_identifiers=candidate_identifiers,
+        retrieval_notes=retrieval_notes,
     )

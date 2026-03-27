@@ -2,25 +2,51 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from time import monotonic
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
-from src.config import APP_VERSION, COMING_SOON_MESSAGE, CORS_ORIGINS, DEFAULT_DRIVER
+from src.config import (
+    APP_VERSION,
+    CORS_ORIGINS,
+    DEFAULT_DRIVER,
+    EVAL_CLAIMS_DIR,
+    FORMALIZE_TEMPERATURE,
+    MISTRAL_API_KEY,
+    MISTRAL_MODEL,
+    PROVE_TEMPERATURE,
+)
+from src.drivers.base import DriverConfig
+from src.drivers.registry import get_formalizer_driver, get_prover_driver
+from src.explainer import explain_verification_result_async
+from src.formalizer import formalize_claim
+from src.lean import compile_check, lean_workspace_available
 from src.models import (
     CompileRequest,
+    CompileResponse,
     ErrorResponse,
     ExplainRequest,
+    ExplainResponse,
     FormalizeRequest,
+    FormalizeResponse,
     HealthResponse,
     JobStatus,
     MetricsResponse,
     SearchRequest,
     SearchResponse,
+    VerifyAcceptedResponse,
     VerifyRequest,
 )
+from src.prover import VerificationHarness
+from src.prover.file_controller import ProofFileController
+from src.prover.tool_tracker import BudgetTracker
 from src.search.engine import search_claim
+from src.store import job_store
 
 START_TIME = monotonic()
 
@@ -38,25 +64,86 @@ app.add_middleware(
 )
 
 
-def _not_implemented() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail=COMING_SOON_MESSAGE,
-    )
-
-
 def _health_payload() -> HealthResponse:
     return HealthResponse(
         status="ok",
-        lean_available=False,
+        lean_available=lean_workspace_available(),
         driver=DEFAULT_DRIVER,
         version=APP_VERSION,
     )
 
 
+def _formalizer_driver():
+    return get_formalizer_driver(
+        DEFAULT_DRIVER,
+        DriverConfig(
+            model=MISTRAL_MODEL,
+            api_key=MISTRAL_API_KEY,
+            temperature=FORMALIZE_TEMPERATURE,
+        ),
+    )
+
+
+def _prover_driver():
+    return get_prover_driver(
+        DEFAULT_DRIVER,
+        DriverConfig(
+            model=MISTRAL_MODEL,
+            api_key=MISTRAL_API_KEY,
+            temperature=PROVE_TEMPERATURE,
+        ),
+    )
+
+
+def _verification_harness() -> VerificationHarness:
+    return VerificationHarness(
+        driver=_prover_driver(),
+        file_controller=ProofFileController(),
+        budget_tracker=BudgetTracker(),
+    )
+
+
+def _baseline_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if not EVAL_CLAIMS_DIR.exists():
+        return counts
+
+    for path in sorted(EVAL_CLAIMS_DIR.glob("*.jsonl")):
+        with path.open(encoding="utf-8") as handle:
+            counts[path.stem] = sum(1 for line in handle if line.strip())
+    return counts
+
+
+async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
+    """Run one verification job to completion in the background."""
+
+    try:
+        job_store.start(job_id)
+        harness = _verification_harness()
+        status_result = await harness.verify(
+            request.theorem_with_sorry,
+            job_id,
+            on_progress=lambda stage, payload: job_store.record_progress(
+                job_id,
+                stage,
+                payload=payload,
+            ),
+        )
+        if status_result.status == "completed":
+            job_store.complete(job_id, status_result.result or {})
+            return
+        job_store.fail(
+            job_id,
+            status_result.error or "Verification failed.",
+            result=status_result.result,
+        )
+    except Exception as exc:
+        job_store.fail(job_id, f"{exc.__class__.__name__}: {exc}")
+
+
 @app.get("/health", response_model=HealthResponse, responses={500: {"model": ErrorResponse}})
 async def health() -> HealthResponse:
-    """Return service liveness and alpha environment state."""
+    """Return service health and Lean workspace readiness."""
 
     return _health_payload()
 
@@ -72,57 +159,136 @@ async def search(request: SearchRequest) -> SearchResponse:
     return search_claim(request.raw_claim, request.domain)
 
 
-@app.post("/api/v2/formalize")
-async def formalize(request: FormalizeRequest) -> dict[str, str]:
-    """Phase 2A placeholder for theorem-stub generation."""
+@app.post(
+    "/api/v2/formalize",
+    response_model=FormalizeResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def formalize(request: FormalizeRequest) -> FormalizeResponse:
+    """Generate a compile-validated theorem stub."""
 
-    _ = request
-    raise _not_implemented()
+    search_context = search_claim(request.raw_claim).model_dump()
+    return await formalize_claim(
+        request.raw_claim,
+        preamble_names=request.preamble_names,
+        search_context=search_context,
+    )
 
 
-@app.post("/api/v2/compile")
-async def compile_endpoint(request: CompileRequest) -> dict[str, str]:
-    """Phase 2A placeholder for direct Lean compilation."""
+@app.post(
+    "/api/v2/compile",
+    response_model=CompileResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def compile_endpoint(request: CompileRequest) -> CompileResponse:
+    """Compile Lean code directly with the local workspace toolchain."""
 
-    _ = request
-    raise _not_implemented()
+    result = compile_check(request.lean_code)
+    errors = list(result["errors"])
+    if result["has_sorry"] and "Proof contains 'sorry'." not in errors:
+        errors.append("Proof contains 'sorry'.")
+    return CompileResponse(
+        success=result["success"],
+        output=result["output"],
+        errors=errors,
+    )
 
 
-@app.post("/api/v2/verify", status_code=status.HTTP_202_ACCEPTED)
-async def verify(request: VerifyRequest) -> dict[str, str]:
-    """Phase 2A placeholder for async proof generation and verification."""
+@app.post(
+    "/api/v2/verify",
+    response_model=VerifyAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def verify(request: VerifyRequest) -> VerifyAcceptedResponse:
+    """Queue an asynchronous Lean proof attempt."""
 
-    _ = request
-    raise _not_implemented()
+    if "sorry" not in request.theorem_with_sorry:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="`theorem_with_sorry` must contain a `sorry` placeholder.",
+        )
+
+    job = job_store.create(request.model_dump())
+    asyncio.create_task(_run_verify_job(job.id, request))
+    return VerifyAcceptedResponse(
+        job_id=job.id,
+        status="queued",
+        message="Verification job accepted.",
+    )
 
 
 @app.get("/api/v2/jobs/{job_id}", response_model=JobStatus)
 async def get_job(job_id: str) -> JobStatus:
-    """Phase 2A placeholder for job polling."""
+    """Return the latest persisted job status."""
 
-    _ = job_id
-    raise _not_implemented()
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+    return job
 
 
 @app.get("/api/v2/jobs/{job_id}/stream")
-async def stream_job(job_id: str) -> dict[str, str]:
-    """Phase 2A placeholder for SSE job progress."""
+async def stream_job(job_id: str) -> StreamingResponse:
+    """Stream job progress as SSE events."""
 
-    _ = job_id
-    raise _not_implemented()
+    if job_store.get(job_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+
+    async def event_stream():
+        subscriber = job_store.subscribe(job_id)
+        try:
+            snapshot = job_store.get(job_id)
+            if snapshot is not None:
+                yield f"data: {json.dumps({'type': 'snapshot', 'job': snapshot.model_dump()})}\n\n"
+                if snapshot.status in {"completed", "failed"}:
+                    return
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(subscriber.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("status") in {"completed", "failed"}:
+                    return
+        finally:
+            job_store.unsubscribe(job_id, subscriber)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/api/v2/explain")
-async def explain(request: ExplainRequest) -> dict[str, str]:
-    """Phase 2A placeholder for natural-language explanations."""
+@app.post(
+    "/api/v2/explain",
+    response_model=ExplainResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def explain(request: ExplainRequest) -> ExplainResponse:
+    """Explain a verification result in natural language."""
 
-    _ = request
-    raise _not_implemented()
+    explanation = await explain_verification_result_async(request.verification_result)
+    return ExplainResponse(explanation=explanation)
 
 
 @app.get("/api/v2/metrics", response_model=MetricsResponse)
 async def metrics() -> MetricsResponse:
-    """Phase 2A placeholder for benchmark and telemetry snapshots."""
+    """Return benchmark and operational metrics."""
 
-    _ = START_TIME
-    raise _not_implemented()
+    counts = job_store.counts()
+    baselines: dict[str, Any] = {
+        "claim_sets": _baseline_counts(),
+        "lean_available": lean_workspace_available(),
+        "drivers": {
+            "default": DEFAULT_DRIVER,
+            "formalizer": _formalizer_driver().name,
+            "prover": _prover_driver().name,
+        },
+    }
+    return MetricsResponse(
+        baselines=baselines,
+        uptime=monotonic() - START_TIME,
+        queue_depth=counts["queue_depth"],
+        active_jobs=counts["active_jobs"],
+    )

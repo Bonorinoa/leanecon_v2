@@ -1,7 +1,41 @@
-"""Placeholder tests for the formalizer scaffold."""
+"""Formalizer tests for the Phase 3 implementation."""
+
+from __future__ import annotations
+
+import pytest
+
+from src.formalizer import formalize_claim, scope_check
 
 
-def test_formalizer_placeholder() -> None:
-    """Phase 2A keeps formalization deferred."""
+def test_scope_check_identifies_raw_lean() -> None:
+    """Raw Lean snippets should bypass the natural-language path."""
 
-    assert True
+    assert scope_check("theorem x : True := by\n  sorry") == "RAW_LEAN"
+
+
+@pytest.mark.anyio
+async def test_formalize_claim_generates_budget_set_stub() -> None:
+    """Formalization should generate a compile-valid theorem stub."""
+
+    response = await formalize_claim(
+        (
+            "A two-good bundle with spending p1 * x1 + p2 * x2 less than or equal "
+            "to income m lies in the budget set."
+        ),
+        preamble_names=["budget_set"],
+    )
+
+    assert response.success is True
+    assert response.theorem_code is not None
+    assert "in_budget_set" in response.theorem_code
+    assert "sorry" in response.theorem_code
+
+
+@pytest.mark.anyio
+async def test_formalize_claim_accepts_raw_lean_stub() -> None:
+    """Raw Lean theorem stubs should be accepted when they compile with sorry."""
+
+    response = await formalize_claim("theorem raw_budget : 1 + 1 = 2 := by\n  sorry\n")
+
+    assert response.success is True
+    assert response.scope == "RAW_LEAN"
