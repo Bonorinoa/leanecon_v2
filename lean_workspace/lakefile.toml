@@ -1,0 +1,10 @@
+name = "LeanEcon"
+version = "0.1.0"
+defaultTargets = ["leanecon"]
+
+[[lean_lib]]
+name = "LeanEcon"
+
+[[lean_exe]]
+name = "leanecon"
+root = "Main"
