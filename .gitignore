@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.cache/
+*.db
+lean_workspace/build/
+lean_workspace/.lake/
+.vscode/
+.idea/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
