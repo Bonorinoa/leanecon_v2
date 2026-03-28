@@ -36,6 +36,31 @@ Tool guidance:
 Good pattern:
 read_current_code -> compile_current_code -> apply_tactic or write_current_code ->
 compile_current_code -> repeat only if Lean still reports errors.
+
+Mathematical reasoning strategy — think lemma-by-lemma:
+1. Before attempting tactics, analyze the theorem statement:
+   - Identify which LeanEcon preamble definitions appear in the goal (e.g.
+     marshallian_demand_good1, nkpc, expected_payoff_2x2, profit, in_budget_set).
+   - Plan which definitions need unfolding and in what order.
+   - Identify which hypotheses will be needed and at which step.
+2. Decompose the proof into a sequence of subgoals. For example: "First unfold
+   the definitions, then simplify the algebra, then use the hypothesis to close
+   the final gap."
+3. Common multi-step patterns in LeanEcon proofs:
+   a. `unfold <def> ; field_simp ; ring`  — algebraic identities involving
+      noncomputable definitions with division.
+   b. `unfold <def> ; ring`  — algebraic identities after definition expansion.
+   c. `unfold <def> at h ⊢ ; linarith`  — inequalities that need hypotheses
+      and goals to both be unfolded before linear arithmetic applies.
+   d. `unfold <def> ; exact h`  — when a hypothesis directly matches the
+      unfolded goal.
+   e. `unfold <def> ; rw [h] ; field_simp`  — when a hypothesis enables
+      substitution before simplification.
+4. LeanEcon preamble definitions are `noncomputable`. Tactics like `simp`,
+   `ring`, `field_simp`, and `rfl` cannot see through them without an explicit
+   `unfold <def_name>` or `simp only [<def_name>]` first.
+5. When a tactic fails, read the Lean error to determine the current goal state,
+   then adjust your plan accordingly.
 """.strip()
 
 

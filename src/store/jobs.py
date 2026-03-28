@@ -218,10 +218,15 @@ class JobStore:
         job.result = result
         job.error = error
         self.upsert(job)
-        self.publish(
-            job_id,
-            {"type": "complete", "status": "failed", "job_id": job_id, "error": error},
-        )
+        event: dict[str, Any] = {
+            "type": "complete",
+            "status": "failed",
+            "job_id": job_id,
+            "error": error,
+        }
+        if result is not None:
+            event["result"] = result
+        self.publish(job_id, event)
         return job
 
     def get(self, job_id: str) -> JobStatus | None:

@@ -117,18 +117,32 @@ def _baseline_counts() -> dict[str, int]:
 async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
     """Run one verification job to completion in the background."""
 
+    harness = _verification_harness()
+    last_stage = "init"
+
+    def _progress_tracker(stage: str, payload: dict[str, Any]) -> None:
+        nonlocal last_stage
+        last_stage = stage
+        job_store.record_progress(job_id, stage, payload=payload)
+
+    def _partial_result(stop_reason: str) -> dict[str, Any]:
+        """Build structured failure data from the harness's current state."""
+        return {
+            "partial": True,
+            "stop_reason": stop_reason,
+            "tool_calls_made": harness.budget_tracker.total_tool_calls,
+            "last_stage": last_stage,
+            "tool_history": list(harness.budget_tracker.tool_history),
+            "tool_budget": harness.budget_tracker.snapshot(),
+        }
+
     try:
         job_store.start(job_id)
-        harness = _verification_harness()
         async with asyncio.timeout(request.timeout):
             status_result = await harness.verify(
                 request.theorem_with_sorry,
                 job_id,
-                on_progress=lambda stage, payload: job_store.record_progress(
-                    job_id,
-                    stage,
-                    payload=payload,
-                ),
+                on_progress=_progress_tracker,
                 max_steps=request.max_steps,
             )
         if status_result.status == "completed":
@@ -140,9 +154,17 @@ async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
             result=status_result.result,
         )
     except TimeoutError:
-        job_store.fail(job_id, f"Verification timed out after {request.timeout}s.")
+        job_store.fail(
+            job_id,
+            f"Verification timed out after {request.timeout}s.",
+            result=_partial_result("timeout"),
+        )
     except Exception as exc:
-        job_store.fail(job_id, f"{exc.__class__.__name__}: {exc}")
+        job_store.fail(
+            job_id,
+            f"{exc.__class__.__name__}: {exc}",
+            result=_partial_result("exception"),
+        )
 
 
 @app.get("/health", response_model=HealthResponse, responses={500: {"model": ErrorResponse}})

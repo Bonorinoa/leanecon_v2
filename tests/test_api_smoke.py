@@ -83,6 +83,7 @@ def test_verify_endpoint_runs_job_to_completion(client: TestClient) -> None:
     assert terminal["result"]["status"] == "verified"
 
 
+
 def test_metrics_endpoint_is_live(client: TestClient) -> None:
     """Metrics should expose baseline counts and queue information."""
 

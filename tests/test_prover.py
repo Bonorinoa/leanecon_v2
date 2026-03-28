@@ -116,6 +116,74 @@ async def test_verification_harness_fails_cleanly_without_provider_key(
     assert result.error == "MISTRAL_API_KEY is not configured."
 
 
+class SlowDriver:
+    """Fake driver that hangs forever, simulating a timeout scenario."""
+
+    @property
+    def name(self) -> str:
+        return "slow_fake"
+
+    async def prove(self, *, system_prompt, user_prompt, tools, on_tool_call, max_steps=64):
+        import asyncio
+
+        # Read current code (one tool call before stalling)
+        read_call = ToolCall(id="call_slow_1", name="read_current_code", arguments={})
+        yield DriverEvent(type="tool_call", data={"name": read_call.name})
+        on_tool_call(read_call)
+        yield DriverEvent(type="tool_result", data={"content": "read ok"})
+
+        # Stall forever (simulates a slow LLM or long computation)
+        await asyncio.sleep(3600)
+        yield DriverEvent(type="done", data={"content": "should never reach here"})
+
+
+@pytest.mark.anyio
+async def test_timeout_returns_structured_partial_result(tmp_path, monkeypatch) -> None:
+    """When verification times out, the result should include structured failure data."""
+    import asyncio
+
+    monkeypatch.setattr("src.prover.harness.suggest_fast_path_tactics", lambda _code: [])
+
+    harness = VerificationHarness(
+        driver=SlowDriver(),
+        file_controller=ProofFileController(workspace_root=tmp_path),
+        budget_tracker=BudgetTracker(),
+    )
+
+    last_stage = "init"
+
+    def progress_tracker(stage, payload):
+        nonlocal last_stage
+        last_stage = stage
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(2):
+            await harness.verify(
+                "import Mathlib\n\ntheorem timeout_test : True := by\n  sorry\n",
+                "job_timeout",
+                on_progress=progress_tracker,
+                max_steps=4,
+            )
+
+    # After timeout, the harness state should be accessible
+    assert harness.budget_tracker.total_tool_calls == 1
+    assert harness.budget_tracker.tool_history == ["read_current_code"]
+
+    # Build partial result the same way the API does
+    partial = {
+        "partial": True,
+        "stop_reason": "timeout",
+        "tool_calls_made": harness.budget_tracker.total_tool_calls,
+        "last_stage": last_stage,
+        "tool_history": list(harness.budget_tracker.tool_history),
+        "tool_budget": harness.budget_tracker.snapshot(),
+    }
+    assert partial["partial"] is True
+    assert partial["stop_reason"] == "timeout"
+    assert partial["tool_calls_made"] == 1
+    assert partial["tool_history"] == ["read_current_code"]
+
+
 @pytest.mark.anyio
 async def test_verification_harness_uses_budget_set_fast_path(tmp_path) -> None:
     """Budget-set membership stubs should be closed by the local simpa tactic."""
