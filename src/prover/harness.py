@@ -13,7 +13,7 @@ from src.lean import compile_check
 from src.models import JobStatus
 from src.prover.fast_path import replace_sorry_with_tactic, suggest_fast_path_tactics
 from src.prover.file_controller import ProofFileController
-from src.prover.prompts import PROVER_SYSTEM_PROMPT
+from src.prover.prompts import PROVER_SYSTEM_PROMPT, build_prover_user_prompt
 from src.prover.tool_tracker import BudgetTracker
 from src.search import search_claim
 
@@ -45,6 +45,8 @@ class VerificationHarness:
         theorem_with_sorry: str,
         job_id: str,
         on_progress: Callable[[str, dict[str, Any]], None] | None = None,
+        *,
+        max_steps: int = 16,
     ) -> JobStatus:
         """Verify a theorem stub, trying local tactics before provider calls."""
 
@@ -69,6 +71,7 @@ class VerificationHarness:
                     "compile": initial_check,
                     "attempts": [],
                     "tool_history": [],
+                    "tool_budget": self.budget_tracker.snapshot(),
                 },
                 error=None,
             )
@@ -84,6 +87,7 @@ class VerificationHarness:
                     "theorem": theorem_name,
                     "compile": initial_check,
                     "tool_history": [],
+                    "tool_budget": self.budget_tracker.snapshot(),
                 },
                 error="Initial theorem did not compile as a valid theorem stub.",
             )
@@ -123,11 +127,17 @@ class VerificationHarness:
                         "compile": candidate_result,
                         "attempts": attempts,
                         "tool_history": list(self.budget_tracker.tool_history),
+                        "tool_budget": self.budget_tracker.snapshot(),
                     },
                     error=None,
                 )
 
-        provider_result = await self._provider_attempt(job_id, theorem_with_sorry, on_progress)
+        provider_result = await self._provider_attempt(
+            job_id,
+            theorem_with_sorry,
+            on_progress,
+            max_steps=max_steps,
+        )
         if provider_result is not None:
             return provider_result
 
@@ -142,6 +152,7 @@ class VerificationHarness:
                 "compile": initial_check,
                 "attempts": attempts,
                 "tool_history": list(self.budget_tracker.tool_history),
+                "tool_budget": self.budget_tracker.snapshot(),
             },
             error="Fast-path proving failed and no provider-backed proof was available.",
         )
@@ -151,6 +162,8 @@ class VerificationHarness:
         job_id: str,
         theorem_with_sorry: str,
         on_progress: Callable[[str, dict[str, Any]], None] | None,
+        *,
+        max_steps: int,
     ) -> JobStatus | None:
         """Use the configured provider for tool-mediated proof search."""
 
@@ -159,8 +172,10 @@ class VerificationHarness:
         attempts: list[dict[str, Any]] = []
         driver_failed = False
         driver_error = ""
+        checkpoint_step = 1000
 
         def on_tool_call(tool_call: ToolCall) -> ToolResult:
+            nonlocal checkpoint_step
             if not self.budget_tracker.can_continue():
                 return ToolResult(tool_call.id, "Tool budget exhausted.", is_error=True)
 
@@ -180,7 +195,12 @@ class VerificationHarness:
                 if not new_code:
                     return ToolResult(tool_call.id, "Missing theorem_code.", is_error=True)
                 self.file_controller.write_current_code(job_id, new_code)
-                return ToolResult(tool_call.id, "Updated theorem code.")
+                checkpoint_step += 1
+                self.file_controller.checkpoint(job_id, checkpoint_step)
+                return ToolResult(
+                    tool_call.id,
+                    "Updated theorem code and saved a checkpoint. Run compile_current_code next.",
+                )
             if tool_call.name == "apply_tactic":
                 tactic = str(tool_call.arguments.get("tactic", "")).strip()
                 candidate = replace_sorry_with_tactic(
@@ -190,7 +210,15 @@ class VerificationHarness:
                 if candidate is None:
                     return ToolResult(tool_call.id, "No standalone sorry found.", is_error=True)
                 self.file_controller.write_current_code(job_id, candidate)
-                return ToolResult(tool_call.id, "Applied tactic candidate.")
+                checkpoint_step += 1
+                self.file_controller.checkpoint(job_id, checkpoint_step)
+                return ToolResult(
+                    tool_call.id,
+                    (
+                        "Applied tactic candidate and saved a checkpoint. "
+                        "Run compile_current_code next."
+                    ),
+                )
             return ToolResult(tool_call.id, f"Unknown tool: {tool_call.name}", is_error=True)
 
         tools = [
@@ -236,12 +264,21 @@ class VerificationHarness:
             ),
         ]
 
+        if on_progress:
+            on_progress(
+                "provider_dispatch",
+                {
+                    "max_steps": max_steps,
+                    "budget": self.budget_tracker.snapshot(),
+                },
+            )
+
         async for event in self.driver.prove(
             system_prompt=PROVER_SYSTEM_PROMPT,
-            user_prompt=theorem_with_sorry,
+            user_prompt=build_prover_user_prompt(theorem_with_sorry),
             tools=tools,
             on_tool_call=on_tool_call,
-            max_steps=16,
+            max_steps=max_steps,
         ):
             attempts.append({"event": event.type, "data": event.data})
             if on_progress:
@@ -268,6 +305,7 @@ class VerificationHarness:
                     "compile": final_check,
                     "attempts": attempts,
                     "tool_history": list(self.budget_tracker.tool_history),
+                    "tool_budget": self.budget_tracker.snapshot(),
                 },
                 error=None,
             )
@@ -284,6 +322,7 @@ class VerificationHarness:
                     "compile": final_check,
                     "attempts": attempts,
                     "tool_history": list(self.budget_tracker.tool_history),
+                    "tool_budget": self.budget_tracker.snapshot(),
                 },
                 error=driver_error or "Provider-backed proof search did not close the theorem.",
             )

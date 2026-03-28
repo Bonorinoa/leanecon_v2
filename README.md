@@ -23,6 +23,16 @@ system overview lives in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 `alpha` — scaffold complete, core implementation in progress.
 
+## Railway
+
+LeanEcon ships with a `railway.toml` and Docker-based deploy path. Railway can
+probe `/health` after boot, and the image prebuilds the Lean workspace so
+`/api/v2/compile` is ready without a first-request build.
+
+`MISTRAL_API_KEY` is optional for deployment. When it is unset, `/health`,
+`/api/v2/search`, and `/api/v2/compile` remain live, while provider-backed
+formalization/proving falls back gracefully instead of crashing the service.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

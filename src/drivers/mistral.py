@@ -18,6 +18,23 @@ from src.drivers.base import (
 )
 
 
+def _client_kwargs(config: DriverConfig) -> dict[str, Any]:
+    """Map provider-agnostic config onto the current Mistral SDK."""
+
+    kwargs: dict[str, Any] = {"api_key": config.api_key}
+    if config.base_url:
+        kwargs["server_url"] = config.base_url
+    if config.timeout:
+        kwargs["timeout_ms"] = max(1, int(config.timeout * 1000))
+    return kwargs
+
+
+def _provider_error_message(exc: Exception) -> str:
+    """Render one provider failure as a concise user-facing message."""
+
+    return f"Mistral request failed: {exc.__class__.__name__}: {exc}"
+
+
 def _message_text(content: Any) -> str:
     """Normalize provider content blocks into plain text."""
 
@@ -45,7 +62,7 @@ def _model_dump(message: Any) -> dict[str, Any]:
     """Serialize a provider message back into the next chat turn."""
 
     if hasattr(message, "model_dump"):
-        return message.model_dump(exclude_none=True)
+        return message.model_dump(exclude_none=True, exclude_unset=True)
     if isinstance(message, dict):
         return message
     return {
@@ -107,17 +124,24 @@ class MistralFormalizerDriver:
         if not self.config.api_key:
             raise RuntimeError("MISTRAL_API_KEY is not configured.")
         if self._client is None:
-            self._client = Mistral(api_key=self.config.api_key)
-        response = await self._client.chat.complete_async(
-            model=self.config.model,
-            temperature=self.config.temperature,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        return _message_text(response.choices[0].message.content)
+            self._client = Mistral(**_client_kwargs(self.config))
+        try:
+            response = await self._client.chat.complete_async(
+                model=self.config.model,
+                temperature=self.config.temperature,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+        except Exception as exc:  # pragma: no cover - exact SDK failures are mocked in tests.
+            raise RuntimeError(_provider_error_message(exc)) from exc
+
+        try:
+            return _message_text(response.choices[0].message.content)
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise RuntimeError("Mistral response did not include an assistant message.") from exc
 
 
 @register_prover("mistral")
@@ -147,7 +171,7 @@ class MistralProverDriver:
             yield DriverEvent(type="error", data="MISTRAL_API_KEY is not configured.")
             return
         if self._client is None:
-            self._client = Mistral(api_key=self.config.api_key)
+            self._client = Mistral(**_client_kwargs(self.config))
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -155,17 +179,30 @@ class MistralProverDriver:
         schemas = [_tool_schema(tool) for tool in tools]
 
         for step in range(1, max_steps + 1):
-            response = await self._client.chat.complete_async(
-                model=self.config.model,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                messages=messages,
-                tools=schemas,
-                tool_choice="auto",
-                parallel_tool_calls=False,
-            )
-            choice = response.choices[0]
-            message = choice.message
+            try:
+                response = await self._client.chat.complete_async(
+                    model=self.config.model,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    messages=messages,
+                    tools=schemas,
+                    tool_choice="auto",
+                    parallel_tool_calls=False,
+                )
+            except Exception as exc:  # pragma: no cover - exact SDK failures are mocked in tests.
+                yield DriverEvent(type="error", data=_provider_error_message(exc))
+                return
+
+            try:
+                choice = response.choices[0]
+                message = choice.message
+            except (AttributeError, IndexError, TypeError):
+                yield DriverEvent(
+                    type="error",
+                    data="Mistral response did not include a valid assistant choice.",
+                )
+                return
+
             messages.append(_model_dump(message))
 
             assistant_text = _message_text(message.content)

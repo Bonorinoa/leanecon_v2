@@ -120,15 +120,17 @@ async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
     try:
         job_store.start(job_id)
         harness = _verification_harness()
-        status_result = await harness.verify(
-            request.theorem_with_sorry,
-            job_id,
-            on_progress=lambda stage, payload: job_store.record_progress(
+        async with asyncio.timeout(request.timeout):
+            status_result = await harness.verify(
+                request.theorem_with_sorry,
                 job_id,
-                stage,
-                payload=payload,
-            ),
-        )
+                on_progress=lambda stage, payload: job_store.record_progress(
+                    job_id,
+                    stage,
+                    payload=payload,
+                ),
+                max_steps=request.max_steps,
+            )
         if status_result.status == "completed":
             job_store.complete(job_id, status_result.result or {})
             return
@@ -137,6 +139,8 @@ async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
             status_result.error or "Verification failed.",
             result=status_result.result,
         )
+    except TimeoutError:
+        job_store.fail(job_id, f"Verification timed out after {request.timeout}s.")
     except Exception as exc:
         job_store.fail(job_id, f"{exc.__class__.__name__}: {exc}")
 

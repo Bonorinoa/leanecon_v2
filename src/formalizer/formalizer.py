@@ -15,7 +15,12 @@ from src.config import (
 )
 from src.drivers.base import DriverConfig, FormalizerDriver
 from src.drivers.registry import get_formalizer_driver
-from src.formalizer.prompts import FORMALIZER_SYSTEM_PROMPT, FORMALIZER_USER_PROMPT_TEMPLATE
+from src.formalizer.prompts import (
+    build_formalize_system_prompt,
+    build_formalize_user_prompt,
+    build_repair_system_prompt,
+    build_repair_user_prompt,
+)
 from src.lean import compile_check
 from src.models import FormalizeResponse
 from src.search import FormalizationContext, build_formalization_context
@@ -229,20 +234,72 @@ def _provider_driver() -> FormalizerDriver | None:
     )
 
 
+def _compile_errors(compile_result: dict[str, Any]) -> list[str]:
+    """Extract a stable list of diagnostics from one compile result."""
+
+    errors = list(compile_result.get("errors") or [])
+    if errors:
+        return errors
+    output = str(compile_result.get("output", "")).strip()
+    return [output] if output else ["Lean compilation failed without diagnostics."]
+
+
+def _dedupe_errors(errors: list[str]) -> list[str]:
+    """Keep error reporting compact and stable for API responses."""
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for error in errors:
+        if error in seen:
+            continue
+        seen.add(error)
+        deduped.append(error)
+    return deduped
+
+
 async def _provider_attempt(raw_claim: str, context: FormalizationContext) -> str | None:
     driver = _provider_driver()
     if driver is None:
         return None
 
-    user_prompt = FORMALIZER_USER_PROMPT_TEMPLATE.format(
-        raw_claim=raw_claim,
-        search_context=context.build_prompt_block(),
-    )
-    raw_output = await driver.formalize(
-        system_prompt=FORMALIZER_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-    )
-    return _ensure_imports(_strip_fences(raw_output), context)
+    try:
+        raw_output = await driver.formalize(
+            system_prompt=build_formalize_system_prompt(
+                context_block=context.build_prompt_block(),
+                preamble_block=context.preamble_block,
+            ),
+            user_prompt=build_formalize_user_prompt(raw_claim),
+        )
+    except RuntimeError:
+        return None
+    return _repair_candidate(raw_claim, raw_output, context)
+
+
+async def _provider_repair_attempt(
+    raw_claim: str,
+    theorem_code: str,
+    context: FormalizationContext,
+    errors: list[str],
+) -> str | None:
+    """Ask the provider for one bounded repair pass after compilation failure."""
+
+    driver = _provider_driver()
+    if driver is None:
+        return None
+
+    bucket = _classify_repair_bucket(errors)
+    try:
+        raw_output = await driver.formalize(
+            system_prompt=build_repair_system_prompt(
+                bucket,
+                context_block=context.build_prompt_block(),
+                preamble_block=context.preamble_block,
+            ),
+            user_prompt=build_repair_user_prompt(raw_claim, theorem_code, errors),
+        )
+    except RuntimeError:
+        return None
+    return _repair_candidate(raw_claim, raw_output, context)
 
 
 async def formalize_claim(
@@ -310,17 +367,32 @@ async def formalize_claim(
                 scope=scope,
                 search_context=context_payload,
                 attempts=attempts,
-                errors=collected_errors,
+                errors=_dedupe_errors(collected_errors),
                 message="Generated a Lean theorem stub that compiles with `sorry`.",
             )
             _FORMALIZATION_CACHE.set(cache_key, response.model_dump())
             return response
 
-        collected_errors.extend(compile_result["errors"] or [compile_result["output"]])
-        bucket = _classify_repair_bucket(compile_result["errors"])
-        candidate = _repair_candidate(raw_claim, candidate, context)
-        if bucket == "semantic_mismatch":
+        current_errors = _compile_errors(compile_result)
+        collected_errors.extend(current_errors)
+        repaired_candidate = _repair_candidate(raw_claim, candidate, context)
+        if repaired_candidate != candidate:
+            candidate = repaired_candidate
+            continue
+
+        provider_repair = await _provider_repair_attempt(
+            raw_claim,
+            candidate,
+            context,
+            current_errors,
+        )
+        if provider_repair and provider_repair != candidate:
+            candidate = provider_repair
+            continue
+
+        if _classify_repair_bucket(current_errors) == "semantic_mismatch":
             candidate = _heuristic_template(raw_claim, context)
+            continue
 
     return FormalizeResponse(
         success=False,
@@ -328,6 +400,6 @@ async def formalize_claim(
         scope=scope,
         search_context=context_payload,
         attempts=attempts,
-        errors=collected_errors[:10],
+        errors=_dedupe_errors(collected_errors)[:10],
         message="Unable to produce a compile-valid theorem stub.",
     )
