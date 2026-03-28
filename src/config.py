@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if it exists
+load_dotenv()
+
 APP_VERSION = "2.0.0-alpha"
 COMING_SOON_MESSAGE = "Coming in Phase 3"
 
@@ -22,7 +27,7 @@ DEFAULT_DRIVER = os.getenv("LEANECON_DRIVER", "mistral")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "labs-leanstral-2603")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # --- Lean ---
 LEAN_RUN_CODE = os.getenv("LEAN_RUN_CODE", "lean_run_code")
 LAKE_BUILD = os.getenv("LAKE_BUILD", "lake build")
