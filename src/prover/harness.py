@@ -57,6 +57,8 @@ class VerificationHarness:
         if on_progress:
             on_progress("initialize", {"theorem": theorem_name})
 
+        if on_progress:
+            on_progress("initial_compile", {"theorem": theorem_name})
         initial_check = compile_check(current_code, filename=f"{job_id}_initial.lean")
         if initial_check["success"]:
             return JobStatus(
@@ -99,6 +101,8 @@ class VerificationHarness:
                 continue
             self.file_controller.write_current_code(job_id, candidate)
             self.file_controller.checkpoint(job_id, step)
+            if on_progress:
+                on_progress("fast_path_compile", {"step": step, "tactic": tactic})
             candidate_result = compile_check(candidate, filename=f"{job_id}_fast_{step}.lean")
             attempts.append(
                 {
@@ -141,6 +145,8 @@ class VerificationHarness:
         if provider_result is not None:
             return provider_result
 
+        if on_progress:
+            on_progress("provider_finalize", {"theorem": theorem_name})
         return JobStatus(
             id=job_id,
             status="failed",

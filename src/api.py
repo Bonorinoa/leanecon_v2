@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from time import monotonic
 from typing import Any
 
@@ -114,16 +115,52 @@ def _baseline_counts() -> dict[str, int]:
     return counts
 
 
+def _progress_log_line(stage: str, payload: dict[str, Any]) -> str:
+    """Render a compact verification-progress line for console output."""
+
+    parts = [f"stage={stage}"]
+    for key in (
+        "theorem",
+        "step",
+        "tactic",
+        "success",
+        "event_type",
+        "tool_calls_made",
+        "last_stage",
+        "max_steps",
+        "budget",
+    ):
+        value = payload.get(key)
+        if value is not None:
+            parts.append(f"{key}={value}")
+
+    data = payload.get("data")
+    if data is not None:
+        parts.append(f"data={data}")
+
+    return " | ".join(parts)
+
+
 async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
     """Run one verification job to completion in the background."""
 
     harness = _verification_harness()
     last_stage = "init"
+    print(
+        f"[verify] {job_id}: started theorem={request.theorem_with_sorry.splitlines()[0]}",
+        file=sys.stderr,
+        flush=True,
+    )
 
     def _progress_tracker(stage: str, payload: dict[str, Any]) -> None:
         nonlocal last_stage
         last_stage = stage
         job_store.record_progress(job_id, stage, payload=payload)
+        print(
+            f"[verify] {job_id}: {_progress_log_line(stage, payload)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _partial_result(stop_reason: str) -> dict[str, Any]:
         """Build structured failure data from the harness's current state."""
@@ -147,11 +184,17 @@ async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
             )
         if status_result.status == "completed":
             job_store.complete(job_id, status_result.result or {})
+            print(f"[verify] {job_id}: completed", file=sys.stderr, flush=True)
             return
         job_store.fail(
             job_id,
             status_result.error or "Verification failed.",
             result=status_result.result,
+        )
+        print(
+            f"[verify] {job_id}: failed {status_result.error or 'Verification failed.'}",
+            file=sys.stderr,
+            flush=True,
         )
     except TimeoutError:
         job_store.fail(
@@ -159,11 +202,21 @@ async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
             f"Verification timed out after {request.timeout}s.",
             result=_partial_result("timeout"),
         )
+        print(
+            f"[verify] {job_id}: failed Verification timed out after {request.timeout}s.",
+            file=sys.stderr,
+            flush=True,
+        )
     except Exception as exc:
         job_store.fail(
             job_id,
             f"{exc.__class__.__name__}: {exc}",
             result=_partial_result("exception"),
+        )
+        print(
+            f"[verify] {job_id}: failed {exc.__class__.__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
         )
 
 

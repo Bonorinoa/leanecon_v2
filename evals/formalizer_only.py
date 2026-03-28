@@ -8,9 +8,11 @@ from pathlib import Path
 from time import perf_counter
 
 from evals.common import (
+    claim_prefix,
     frequency_table,
     load_claims,
     make_client,
+    log_line,
     summarize_counts,
     summarize_latencies,
     write_summary,
@@ -19,14 +21,18 @@ from evals.common import (
 
 async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
     claims = load_claims(claim_set)
+    total_claims = len(claims)
     successes = 0
     latencies: list[float] = []
     attempts_used: list[int] = []
     scopes: list[str] = []
     cases: list[dict[str, object]] = []
 
+    log_line(f"[formalizer_only] claim set '{claim_set}' with {total_claims} claims")
     async with make_client() as client:
-        for claim in claims:
+        for claim_index, claim in enumerate(claims, start=1):
+            prefix = claim_prefix("formalizer_only", claim_index, total_claims, claim)
+            log_line(f"{prefix}: formalizing")
             started = perf_counter()
             response = await client.post(
                 "/api/v2/formalize",
@@ -46,6 +52,11 @@ async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
             success = bool(payload.get("success"))
             if success:
                 successes += 1
+            status = "success" if success else "failed"
+            log_line(
+                f"{prefix}: {status} scope={scope} attempts={attempts} "
+                f"latency={latency:.1f}s"
+            )
             cases.append(
                 {
                     "id": claim.get("id") or claim["raw_claim"][:80],

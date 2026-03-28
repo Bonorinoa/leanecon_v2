@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-28
 **Scope:** Two tasks — (1) create `evals/claim_sets/agentic_harness.jsonl` and (2) fix the `/api/v2/verify` timeout path
-
+**Snapshot:** 24/24 passed in 3m47s
 ---
 
 ## Task 1: Agentic Harness Eval Set

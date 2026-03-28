@@ -8,10 +8,13 @@ from pathlib import Path
 from time import perf_counter
 
 from evals.common import (
+    claim_prefix,
     frequency_table,
+    job_progress_line,
     load_claims,
     make_client,
     poll_job,
+    log_line,
     summarize_counts,
     summarize_latencies,
     write_summary,
@@ -20,6 +23,7 @@ from evals.common import (
 
 async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
     claims = load_claims(claim_set)
+    total_claims = len(claims)
     successes = 0
     attempted = 0
     skipped = 0
@@ -30,13 +34,17 @@ async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
     terminal_statuses: list[str] = []
     cases: list[dict[str, object]] = []
 
+    log_line(f"[prover_only] claim set '{claim_set}' with {total_claims} claims")
     async with make_client() as client:
-        for claim in claims:
+        for claim_index, claim in enumerate(claims, start=1):
+            prefix = claim_prefix("prover_only", claim_index, total_claims, claim)
             theorem_with_sorry = claim.get("theorem_stub") or claim.get("raw_lean")
             if not theorem_with_sorry:
                 skipped += 1
+                log_line(f"{prefix}: skipped (missing theorem stub)")
                 continue
             attempted += 1
+            log_line(f"{prefix}: submitting verification job")
             started = perf_counter()
             response = await client.post(
                 "/api/v2/verify",
@@ -44,7 +52,14 @@ async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
             )
             response.raise_for_status()
             payload = response.json()
-            terminal = await poll_job(client, payload["job_id"])
+            job_id = payload["job_id"]
+            log_line(f"{prefix}: queued job {job_id}")
+
+            def on_update(job_payload: dict[str, object], *, heartbeat: bool = False) -> None:
+                suffix = " (waiting)" if heartbeat else ""
+                log_line(f"{prefix}: {job_progress_line(job_payload)}{suffix}")
+
+            terminal = await poll_job(client, job_id, on_update=on_update)
             latency = perf_counter() - started
             latencies.append(latency)
             terminal_statuses.append(str(terminal["status"]))
@@ -56,10 +71,22 @@ async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
             tool_names.extend(tool_history)
             if terminal["status"] == "completed":
                 successes += 1
+            terminal_status = str(terminal["status"])
+            if terminal_status == "completed":
+                log_line(
+                    f"{prefix}: completed in {latency:.1f}s | "
+                    f"attempts={len(attempts)} | tool_calls={len(tool_history)}"
+                )
+            else:
+                terminal_error = terminal.get("error") or "unknown error"
+                log_line(
+                    f"{prefix}: failed in {latency:.1f}s | "
+                    f"error={terminal_error}"
+                )
             cases.append(
                 {
                     "id": claim.get("id") or theorem_with_sorry.splitlines()[0][:80],
-                    "status": terminal["status"],
+                    "status": terminal_status,
                     "latency_seconds": latency,
                     "attempt_count": len(attempts),
                     "tool_calls": len(tool_history),
