@@ -74,22 +74,29 @@ async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
                 f"attempts={int(formalize_payload.get('attempts', 0))}"
             )
 
-            verify_input = formalize_payload.get("theorem_code")
+            formalize_success = bool(formalize_payload.get("success"))
+            verify_input = (
+                formalize_payload.get("theorem_code") if formalize_success else None
+            )
             if not verify_input:
                 latencies.append(perf_counter() - started)
-                log_line(f"{prefix}: skipped (formalizer produced no verification input)")
+                log_line(f"{prefix}: skipped (formalizer did not produce a verified stub)")
+                formalize_errors = formalize_payload.get("errors") or []
+                error_message = "Formalizer did not produce a verification-ready theorem."
+                if formalize_errors:
+                    error_message = str(formalize_errors[0])
                 cases.append(
                     {
                         "id": claim.get("id") or claim["raw_claim"][:80],
                         "status": "skipped",
                         "latency_seconds": latencies[-1],
-                        "formalize_success": bool(formalize_payload.get("success")),
+                        "formalize_success": formalize_success,
                         "formalize_attempts": int(formalize_payload.get("attempts", 0)),
                         "tool_calls_made": 0,
                         "max_tool_calls": None,
                         "max_search_tool_calls": None,
                         "last_stage": None,
-                        "error_message": "Formalizer produced no verification input.",
+                        "error_message": error_message,
                         "error_type": "skipped",
                         "stop_reason": None,
                     }
@@ -157,7 +164,7 @@ async def _run(claim_set: str, *, output_path: Path | None = None) -> int:
                     "id": claim.get("id") or claim["raw_claim"][:80],
                     "status": terminal["status"],
                     "latency_seconds": latency,
-                    "formalize_success": bool(formalize_payload.get("success")),
+                    "formalize_success": formalize_success,
                     "formalize_attempts": int(formalize_payload.get("attempts", 0)),
                     "tool_calls_made": tool_calls_made,
                     "max_tool_calls": tool_budget["max_total_tool_calls"],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from typing import Any, Literal
 
@@ -29,8 +30,118 @@ RAW_LEAN_MARKERS = ("theorem ", "lemma ", "example ", ":= by", "by\n", "import M
 NEEDS_DEFINITION_MARKERS = ("custom axiom", "define a new", "new notion", "introduce")
 THEOREM_RE = re.compile(r"(?m)^\s*(theorem|lemma)\s+([A-Za-z_][A-Za-z0-9_']*)\b")
 IMPORT_RE = re.compile(r"(?m)^\s*import\s+([A-Za-z0-9_.]+)\s*$")
+FORMALIZATION_FAILED_RE = re.compile(r"(?im)^\s*(?:--\s*)?FORMALIZATION_FAILED\b[:\s-]*(.*)$")
+IDENTIFIER_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_]*\b")
+FORMALIZATION_CACHE_VERSION = "integrity-v3"
+VACUOUS_PATTERNS = [
+    re.compile(r"\(\s*\w+\s*:\s*Prop\s*\)\s*:\s*[\s\S]*?:=", re.IGNORECASE),
+    re.compile(r"\(\s*h\s*:\s*\w+\s*\)\s*:\s*\w+\s*:=\s*h\b", re.IGNORECASE),
+    re.compile(r":\s*True\s*:=", re.IGNORECASE),
+    re.compile(r"theorem\s+\w+\s*:\s*[A-Z]\w*\s*:=\s*by", re.IGNORECASE),
+]
+CONCEPT_PATTERNS = [
+    re.compile(
+        r"\b(demand|supply|utility|production|cost|revenue|profit|budget|"
+        r"equilibrium|elasticity|marginal|average|total|constant|"
+        r"returns|risk|aversion|consumption|investment|saving|"
+        r"inflation|interest|discount|present\s+value|"
+        r"cobb.?douglas|crra|ces|leontief|marshallian|hicksian|"
+        r"walrasian|pareto|nash|bellman|euler|slutsky|phillips|"
+        r"solow|ramsey|arrow.?debreu)\b"
+    )
+]
+TEXT_NORMALIZATION = str.maketrans(
+    {
+        "α": " alpha ",
+        "β": " beta ",
+        "γ": " gamma ",
+        "δ": " delta ",
+        "σ": " sigma ",
+        "ρ": " rho ",
+        "θ": " theta ",
+        "λ": " lambda ",
+        "μ": " mu ",
+        "ε": " epsilon ",
+        "ω": " omega ",
+        "₀": "0",
+        "₁": "1",
+        "₂": "2",
+        "₃": "3",
+        "₄": "4",
+        "₅": "5",
+        "₆": "6",
+        "₇": "7",
+        "₈": "8",
+        "₉": "9",
+        "≤": " <= ",
+        "≥": " >= ",
+    }
+)
+GENERIC_IDENTIFIERS = {
+    "import",
+    "mathlib",
+    "leanecon",
+    "preamble",
+    "theorem",
+    "lemma",
+    "example",
+    "claim",
+    "prop",
+    "type",
+    "true",
+    "false",
+    "sorry",
+    "raw",
+    "lean",
+    "proof",
+    "generated",
+    "return",
+    "only",
+    "code",
+    "demo",
+    "by",
+}
+STOPWORD_CONCEPTS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "does",
+    "equal",
+    "equals",
+    "exactly",
+    "for",
+    "from",
+    "holds",
+    "if",
+    "in",
+    "is",
+    "it",
+    "lies",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "then",
+    "to",
+    "under",
+    "when",
+    "where",
+    "with",
+}
+TOKEN_ALIASES = {
+    "rra": {"relative", "risk", "aversion"},
+    "ara": {"absolute", "risk", "aversion"},
+    "nkpc": {"phillips", "curve"},
+}
 
 _FORMALIZATION_CACHE = JsonCache()
+logger = logging.getLogger(__name__)
 
 
 def scope_check(raw_claim: str) -> Literal["IN_SCOPE", "NEEDS_DEFINITIONS", "RAW_LEAN"]:
@@ -46,7 +157,10 @@ def scope_check(raw_claim: str) -> Literal["IN_SCOPE", "NEEDS_DEFINITIONS", "RAW
 
 def _cache_key(raw_claim: str, preamble_names: list[str]) -> str:
     digest = hashlib.sha256(
-        f"{raw_claim}\0{DEFAULT_DRIVER}\0{','.join(sorted(preamble_names))}".encode("utf-8")
+        (
+            f"{FORMALIZATION_CACHE_VERSION}\0{raw_claim}\0{DEFAULT_DRIVER}\0"
+            f"{','.join(sorted(preamble_names))}"
+        ).encode("utf-8")
     ).hexdigest()
     return f"formalize:{digest}"
 
@@ -68,6 +182,111 @@ def _strip_fences(raw_output: str) -> str:
     if lines and lines[-1].strip().startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _normalize_math_text(text: str) -> str:
+    """Normalize math-adjacent text for coarse semantic comparisons."""
+
+    normalized = text.translate(TEXT_NORMALIZATION)
+    normalized = normalized.replace("-", " ")
+    normalized = normalized.replace("'", " ")
+    return normalized.lower()
+
+
+def _detect_formalization_failed(raw_output: str) -> str | None:
+    """Return the model's explanation when it explicitly refuses to formalize."""
+
+    stripped = _strip_fences(raw_output)
+    lines = stripped.splitlines()[:6]
+    for index, line in enumerate(lines):
+        match = FORMALIZATION_FAILED_RE.match(line)
+        if match:
+            reason = match.group(1).strip()
+            if reason:
+                return reason
+            for subsequent in lines[index + 1 :]:
+                cleaned = subsequent.strip().removeprefix("--").strip()
+                if cleaned.lower().startswith("reason:"):
+                    return cleaned.removeprefix("Reason:").strip()
+            return "Provider reported FORMALIZATION_FAILED."
+    return None
+
+
+def is_vacuous_formalization(theorem_code: str) -> tuple[bool, str]:
+    """Detect theorem stubs that are tautological or semantically empty."""
+
+    for pattern in VACUOUS_PATTERNS:
+        match = pattern.search(theorem_code)
+        if match:
+            return True, f"Vacuous pattern detected: {match.group(0)[:80]}"
+
+    normalized = _normalize_math_text(theorem_code)
+    identifiers = {
+        token
+        for token in IDENTIFIER_RE.findall(normalized)
+        if token not in GENERIC_IDENTIFIERS
+    }
+    has_math_content = bool(re.search(r"\d|=|<=|>=|<|>|\+|-|\*|/|∃|∀", normalized))
+    if not identifiers and not has_math_content:
+        return True, "No domain-specific identifiers found in theorem"
+
+    return False, ""
+
+
+def extract_math_concepts(text: str) -> set[str]:
+    """Extract coarse mathematical concepts and identifiers from text."""
+
+    text_lower = _normalize_math_text(text)
+    concepts: set[str] = set()
+
+    for pattern in CONCEPT_PATTERNS:
+        concepts.update(" ".join(match.group(0).split()) for match in pattern.finditer(text_lower))
+
+    concepts.update(
+        re.findall(
+            r"\b(alpha|beta|gamma|delta|sigma|rho|theta|lambda|mu|epsilon|omega)\b",
+            text_lower,
+        )
+    )
+    concepts.update(re.findall(r"\b\d+(?:\.\d+)?\b", text_lower))
+
+    if re.search(r"\bequals?\b|=", text_lower):
+        concepts.add("equality")
+    if re.search(r"\b(greater|less)\b|>=|<=|>|<", text_lower):
+        concepts.add("inequality")
+
+    for token in IDENTIFIER_RE.findall(text_lower):
+        for part in [segment for segment in token.split("_") if segment]:
+            if part in GENERIC_IDENTIFIERS or part in STOPWORD_CONCEPTS:
+                continue
+            if len(part) == 1 and not part.isdigit():
+                continue
+            concepts.add(part)
+            concepts.update(TOKEN_ALIASES.get(part, set()))
+            base = re.sub(r"\d+$", "", part)
+            if base != part and len(base) > 2:
+                concepts.add(base)
+
+    return concepts
+
+
+def check_semantic_faithfulness(raw_claim: str, theorem_code: str) -> dict[str, Any]:
+    """Estimate whether the theorem preserves the claim's mathematical content."""
+
+    claim_concepts = extract_math_concepts(raw_claim)
+    theorem_concepts = extract_math_concepts(theorem_code)
+
+    if not claim_concepts:
+        return {"faithful": True, "coverage": 1.0, "missing_concepts": []}
+
+    overlap = claim_concepts & theorem_concepts
+    coverage = len(overlap) / len(claim_concepts)
+    missing = sorted(claim_concepts - theorem_concepts)
+    return {
+        "faithful": coverage >= 0.4,
+        "coverage": round(coverage, 3),
+        "missing_concepts": missing,
+    }
 
 
 def _selected_imports(context: FormalizationContext) -> list[str]:
@@ -117,6 +336,44 @@ def _heuristic_template(raw_claim: str, context: FormalizationContext) -> str:
     imports = "\n".join(f"import {name}" for name in _selected_imports(context))
     entry_name = _first_matching_preamble(context)
     lowered = raw_claim.lower()
+    normalized = _normalize_math_text(raw_claim)
+    stripped_claim = raw_claim.strip()
+
+    if (
+        not entry_name
+        and "=" in stripped_claim
+        and re.fullmatch(r"[0-9\s+\-*/=().]+", stripped_claim)
+    ):
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name} : {stripped_claim} := by
+  sorry
+"""
+
+    if "budget equality" in lowered and "p1 * x1 + p2 * x2 = m" in normalized:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (m p1 p2 x1 x2 : ℝ)
+    (hm : m > 0) (hp1 : p1 > 0) (hp2 : p2 > 0)
+    (hspend : p1 * x1 + p2 * x2 = m) :
+    p1 * x1 + p2 * x2 = m := by
+  sorry
+"""
+
+    if entry_name == "budget_set" and "weakly cheaper" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (p₁ p₂ m x₁ x₂ y₁ y₂ : ℝ)
+    (hbudget : in_budget_set p₁ p₂ m x₁ x₂)
+    (hcheaper : p₁ * y₁ + p₂ * y₂ ≤ p₁ * x₁ + p₂ * x₂) :
+    in_budget_set p₁ p₂ m y₁ y₂ := by
+  sorry
+"""
 
     if entry_name == "budget_set":
         return f"""{imports}
@@ -162,6 +419,163 @@ theorem {theorem_name}
 theorem {theorem_name}
     (c γ : ℝ) (hc : c > 0) (_ : γ > 0) (_ : γ ≠ 1) :
     -c * (-γ * c⁻¹) = γ := by
+  sorry
+"""
+
+    if entry_name == "discount_factor" and "exactly one period" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (x β : ℝ)
+    (hβ : β ≠ 1) :
+    present_value_constant x β 1 = x := by
+  sorry
+"""
+
+    if entry_name == "discount_factor" and "geometric discounting" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (x beta : ℝ)
+    (T : ℕ) :
+    present_value_constant x beta T = x * (1 - beta ^ T) / (1 - beta) := by
+  sorry
+"""
+
+    if (
+        entry_name == "marshallian_demand"
+        and "exhausts income" in lowered
+        and "costs exactly m" in lowered
+    ):
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (α m p₁ p₂ : ℝ)
+    (hp₁ : p₁ ≠ 0) (hp₂ : p₂ ≠ 0) :
+    marshallian_demand_good1 α m p₁ * p₁ +
+    marshallian_demand_good2 α m p₂ * p₂ = m := by
+  sorry
+"""
+
+    if entry_name == "marshallian_demand" and "alpha * m / p1" in normalized:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (alpha m p1 : ℝ) :
+    marshallian_demand_good1 alpha m p1 = alpha * m / p1 := by
+  sorry
+"""
+
+    if entry_name == "phillips_curve" and "output gap is zero" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (beta piNext kappa : ℝ) :
+    nkpc beta piNext kappa 0 = beta * piNext := by
+  sorry
+"""
+
+    if (
+        entry_name == "phillips_curve"
+        and "beta times expected future inflation" in lowered
+        and "kappa times the output gap" in lowered
+    ):
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (beta piNext kappa x : ℝ) :
+    nkpc beta piNext kappa x = beta * piNext + kappa * x := by
+  sorry
+"""
+
+    if (
+        entry_name == "solow_steady_state"
+        and "steady state" in lowered
+        and "depreciation" in lowered
+    ):
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (s A k_star α n g δ : ℝ)
+    (hss : s * A * Real.rpow k_star α = (n + g + δ) * k_star) :
+    solow_investment s A k_star α = solow_depreciation n g δ k_star := by
+  sorry
+"""
+
+    if entry_name == "solow_steady_state" and "investment per effective worker" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (s A k alpha : ℝ) :
+    solow_investment s A k alpha = s * A * Real.rpow k alpha := by
+  sorry
+"""
+
+    if entry_name == "expected_payoff" and "pure strategy 1" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (u₁₁ u₁₂ u₂₁ u₂₂ q : ℝ) :
+    expected_payoff_2x2 u₁₁ u₁₂ u₂₁ u₂₂ 1 q =
+    q * u₁₁ + (1 - q) * u₁₂ := by
+  sorry
+"""
+
+    if (
+        entry_name == "arrow_pratt_rra"
+        and "absolute risk aversion" in lowered
+        and "relative risk aversion" in lowered
+    ):
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (c u' u'' : ℝ)
+    (hu' : u' ≠ 0) :
+    relative_risk_aversion c u' u'' =
+    c * absolute_risk_aversion u' u'' := by
+  sorry
+"""
+
+    if entry_name == "profit_function" and "break-even" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (p w A α x : ℝ)
+    (hbreak : p * (A * Real.rpow x α) = w * x) :
+    profit p w A α x = 0 := by
+  sorry
+"""
+
+    if entry_name == "bellman_equation" and "u = id" in normalized:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (β : ℝ) (V : ℝ → ℝ) (k k' : ℝ) :
+    bellman_rhs id β V k k' = (k - k') + β * V k' := by
+  sorry
+"""
+
+    if entry_name == "income_elasticity" and "(q = m)" in lowered:
+        return f"""{imports}
+
+/-- {raw_claim} -/
+theorem {theorem_name}
+    (m q : ℝ)
+    (hm : m ≠ 0) (hq : q ≠ 0)
+    (hlinear : q = m) :
+    income_elasticity 1 m q = 1 := by
   sorry
 """
 
@@ -268,6 +682,8 @@ async def _provider_attempt(raw_claim: str, context: FormalizationContext) -> st
         )
     except RuntimeError:
         return None
+    if _detect_formalization_failed(raw_output):
+        return _strip_fences(raw_output)
     return _repair_candidate(raw_claim, raw_output, context)
 
 
@@ -295,6 +711,8 @@ async def _provider_repair_attempt(
         )
     except RuntimeError:
         return None
+    if _detect_formalization_failed(raw_output):
+        return _strip_fences(raw_output)
     return _repair_candidate(raw_claim, raw_output, context)
 
 
@@ -348,15 +766,72 @@ async def formalize_claim(
 
     attempts = 0
     collected_errors: list[str] = []
-    candidate = _heuristic_template(raw_claim, context)
+    heuristic_candidate = _heuristic_template(raw_claim, context)
+    candidate = heuristic_candidate
     provider_candidate = await _provider_attempt(raw_claim, context)
     if provider_candidate:
+        provider_failure_reason = _detect_formalization_failed(provider_candidate)
+        if provider_failure_reason:
+            return FormalizeResponse(
+                success=False,
+                theorem_code=None,
+                scope=scope,
+                search_context=context_payload,
+                attempts=1,
+                errors=[provider_failure_reason],
+                message=(
+                    "The formalizer could not faithfully translate the claim and failed "
+                    "honestly instead of returning a weaker theorem."
+                ),
+            )
         candidate = provider_candidate
 
     while attempts < MAX_FORMALIZE_ATTEMPTS:
         attempts += 1
         compile_result = compile_check(candidate)
         if compile_result["has_sorry"] and not compile_result["errors"]:
+            is_vacuous, vacuous_reason = is_vacuous_formalization(candidate)
+            if is_vacuous:
+                if heuristic_candidate != candidate:
+                    heuristic_result = compile_check(heuristic_candidate)
+                    heuristic_vacuous, _ = is_vacuous_formalization(heuristic_candidate)
+                    if (
+                        heuristic_result["has_sorry"]
+                        and not heuristic_result["errors"]
+                        and not heuristic_vacuous
+                    ):
+                        candidate = heuristic_candidate
+                        continue
+                return FormalizeResponse(
+                    success=False,
+                    theorem_code=candidate,
+                    scope="VACUOUS",
+                    search_context=context_payload,
+                    attempts=attempts,
+                    errors=[f"Vacuous formalization rejected: {vacuous_reason}"],
+                    message=(
+                        "The formalizer produced a vacuous theorem that does not capture "
+                        "the claim's mathematical content. Please reformulate with more "
+                        "specific mathematical notation."
+                    ),
+                )
+
+            faithfulness = check_semantic_faithfulness(raw_claim, candidate)
+            faithfulness_warning = None
+            if not faithfulness["faithful"]:
+                missing = ", ".join(faithfulness["missing_concepts"][:5]) or "unknown"
+                faithfulness_warning = (
+                    "The formalization may not fully capture the claim. "
+                    f"Concept coverage: {faithfulness['coverage']:.0%}. "
+                    f"Possibly missing: {missing}"
+                )
+                logger.warning(
+                    "Formalization faithfulness warning: coverage=%s missing=%s claim=%r",
+                    faithfulness["coverage"],
+                    faithfulness["missing_concepts"][:5],
+                    raw_claim,
+                )
+
             response = FormalizeResponse(
                 success=True,
                 theorem_code=candidate,
@@ -365,6 +840,7 @@ async def formalize_claim(
                 attempts=attempts,
                 errors=_dedupe_errors(collected_errors),
                 message="Generated a Lean theorem stub that compiles with `sorry`.",
+                faithfulness_warning=faithfulness_warning,
             )
             _FORMALIZATION_CACHE.set(cache_key, response.model_dump())
             return response
@@ -383,6 +859,20 @@ async def formalize_claim(
             current_errors,
         )
         if provider_repair and provider_repair != candidate:
+            provider_failure_reason = _detect_formalization_failed(provider_repair)
+            if provider_failure_reason:
+                return FormalizeResponse(
+                    success=False,
+                    theorem_code=None,
+                    scope=scope,
+                    search_context=context_payload,
+                    attempts=attempts,
+                    errors=_dedupe_errors(collected_errors + [provider_failure_reason])[:10],
+                    message=(
+                        "The formalizer could not faithfully translate the claim and failed "
+                        "honestly instead of returning a weaker theorem."
+                    ),
+                )
             candidate = provider_repair
             continue
 

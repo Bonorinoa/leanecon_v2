@@ -88,7 +88,7 @@ class FormalizeResponse(LeanEconModel):
         default=None,
         description="Generated Lean theorem stub containing `sorry`.",
     )
-    scope: Literal["IN_SCOPE", "NEEDS_DEFINITIONS", "RAW_LEAN"] = Field(
+    scope: Literal["IN_SCOPE", "NEEDS_DEFINITIONS", "RAW_LEAN", "VACUOUS"] = Field(
         description="Scope classification for the input claim.",
     )
     search_context: dict[str, Any] = Field(
@@ -103,6 +103,10 @@ class FormalizeResponse(LeanEconModel):
     message: str | None = Field(
         default=None,
         description="Optional human-readable status message.",
+    )
+    faithfulness_warning: str | None = Field(
+        default=None,
+        description="Heuristic warning when the theorem may not preserve claim content.",
     )
 
 
@@ -206,4 +210,3 @@ class NotImplementedResponse(LeanEconModel):
     """Response shape for scaffolded endpoints."""
 
     message: str = Field(description="Scaffold status message.")
-

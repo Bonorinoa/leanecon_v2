@@ -30,8 +30,6 @@ async def test_verification_harness_solves_simple_arithmetic(tmp_path) -> None:
     assert result.status == "completed"
     assert result.result is not None
     assert result.result["status"] == "verified"
-
-
 class FakeRewriteDriver:
     """Small fake driver that exercises the provider tool loop."""
 
@@ -90,8 +88,6 @@ async def test_verification_harness_provider_loop_writes_checkpoints(tmp_path, m
     assert result.result is not None
     assert result.result["tool_history"] == ["write_current_code"]
     assert (tmp_path / "checkpoints" / "job_provider_1001.lean").exists()
-
-
 @pytest.mark.anyio
 async def test_verification_harness_fails_cleanly_without_provider_key(
     tmp_path,
@@ -165,7 +161,10 @@ class CompileSuccessDriver:
         )
         yield DriverEvent(type="tool_call", data={"name": write_call.name})
         write_result = on_tool_call(write_call)
-        yield DriverEvent(type="tool_result", data={"name": write_call.name, "content": write_result.content})
+        yield DriverEvent(
+            type="tool_result",
+            data={"name": write_call.name, "content": write_result.content},
+        )
 
         compile_call = ToolCall(id="call_compile_2", name="compile_current_code", arguments={})
         yield DriverEvent(type="tool_call", data={"name": compile_call.name})
