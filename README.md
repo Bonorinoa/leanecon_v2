@@ -32,7 +32,9 @@ rather than shipping UI code from this repo.
 
 LeanEcon ships with a `railway.toml` and Docker-based deploy path. Railway can
 probe `/health` after boot, and the image prebuilds the Lean workspace so
-`/api/v2/compile` is ready without a first-request build.
+`/api/v2/compile` is ready without a first-request build. The health check now
+verifies that `lake` is actually runnable inside the container, not just that
+the workspace directory exists.
 
 `MISTRAL_API_KEY` is optional for deployment. When it is unset, `/health`,
 `/api/v2/search`, and `/api/v2/compile` remain live, while provider-backed

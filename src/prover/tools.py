@@ -26,7 +26,7 @@ def _format_goals(goals: list[str]) -> str:
 class REPLToolDispatcher:
     """Dispatch prover tool calls through a live LeanInteract session."""
 
-    repl: LeanREPLSession
+    repl: Any
     theorem_code: str
     file_controller: ProofFileController | None = None
     job_id: str | None = None

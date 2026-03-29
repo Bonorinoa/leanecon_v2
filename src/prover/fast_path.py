@@ -62,7 +62,7 @@ def suggest_fast_path_tactics(theorem_with_sorry: str) -> list[str]:
 
 
 async def repl_fast_path(
-    repl: LeanREPLSession,
+    repl: Any,
     theorem_code: str,
     *,
     max_attempts: int = 30,

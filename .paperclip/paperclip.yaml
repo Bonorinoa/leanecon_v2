@@ -1,0 +1,43 @@
+company:
+  name: LeanEcon
+  board:
+    name: Augusto
+    role: Founder
+  mission: Autoresearch ratchets for LeanEcon v2
+
+workspace:
+  root: ..
+  audit_log_dir: .paperclip/logs
+  artifact_dir: .paperclip/artifacts
+
+provider:
+  kind: ollama
+  endpoint: http://127.0.0.1:11434
+  model: mistral
+  fallback_model: llama3
+  temperature: 0.2
+  timeout_seconds: 300
+
+policy:
+  phase_2_5_gate: true
+  require_repl_baseline_before_activation: true
+  require_human_review_for:
+    - PROGRAM.md
+    - docs/API_CONTRACT.md
+    - src/api.py
+    - src/models.py
+    - src/drivers/base.py
+    - src/config.py
+    - lean_workspace/**
+    - lean_workspace/LeanEcon/Preamble/**
+  block_edits_to:
+    - PROGRAM.md
+    - docs/API_CONTRACT.md
+    - src/api.py
+    - src/models.py
+
+agents:
+  - file: agents/ceo.yaml
+  - file: agents/formalizer_researcher.yaml
+  - file: agents/prover_researcher.yaml
+  - file: agents/eval_runner.yaml

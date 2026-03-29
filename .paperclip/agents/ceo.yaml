@@ -1,0 +1,45 @@
+name: CEO
+role: orchestrator
+model:
+  provider: ollama
+  endpoint: http://127.0.0.1:11434
+  name: mistral
+  temperature: 0.2
+schedule: every_4_hours
+activation: on_demand
+
+inputs:
+  - PROGRAM.md
+  - ROADMAP.md
+  - docs/PAPERCLIP_SETUP.md
+  - docs/SUBAGENT_ARCHITECTURE.md
+
+responsibilities:
+  - Decompose PROGRAM.md into ratchet tasks.
+  - Set goals for the formalizer and prover researchers.
+  - Gate overnight loops on benchmark results and human review.
+  - Create or update task summaries without touching off-limits zones.
+
+allowed_edits:
+  - src/formalizer/prompts.py
+  - src/search/hints.py
+  - src/search/engine.py
+  - src/prover/prompts.py
+  - src/prover/fast_path.py
+  - src/prover/tool_tracker.py
+  - evals/**
+  - docs/**
+
+blocked_edits:
+  - PROGRAM.md
+  - docs/API_CONTRACT.md
+  - src/api.py
+  - src/models.py
+  - src/drivers/base.py
+  - src/config.py
+  - lean_workspace/**
+
+outputs:
+  - ratchet_plan
+  - delegation_orders
+  - pr_gating_notes

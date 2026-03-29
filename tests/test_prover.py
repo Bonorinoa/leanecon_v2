@@ -58,6 +58,8 @@ async def test_verification_harness_solves_simple_arithmetic(tmp_path, monkeypat
     assert result.status == "completed"
     assert result.result is not None
     assert result.result["status"] == "verified"
+    assert result.result["telemetry"]["lean_ms"] >= 0
+    assert result.result["telemetry"]["provider_ms"] == 0
 
 
 class FakeLeanREPLSession:
@@ -178,7 +180,9 @@ async def test_verification_harness_uses_repl_fast_path(tmp_path, monkeypatch) -
     assert FakeLeanREPLSession.start_calls == 2
     assert FakeLeanREPLSession.tactic_calls == ["simp", "norm_num"]
     assert FakeLeanREPLSession.verify_calls == ["job_repl_fast_path_fast_2.lean"]
-    assert compile_calls == ["job_repl_fast_path_initial.lean"]
+    assert compile_calls == []
+    assert result.result["telemetry"]["lean_ms"] >= 0
+    assert result.result["telemetry"]["provider_ms"] == 0
 
 
 class FailingLeanREPLSession:
@@ -270,7 +274,9 @@ async def test_verification_harness_falls_back_after_failed_repl_pass(tmp_path, 
     assert FailingLeanREPLSession.instances == 1
     assert FailingLeanREPLSession.start_calls == 1
     assert FailingLeanREPLSession.tactic_calls == ["norm_num"]
-    assert compile_calls == ["job_repl_fallback_initial.lean", "job_repl_fallback_fast_1.lean"]
+    assert compile_calls == ["job_repl_fallback_fast_1.lean"]
+    assert result.result["telemetry"]["lean_ms"] >= 0
+    assert result.result["telemetry"]["provider_ms"] == 0
 class FakeRewriteDriver:
     """Small fake driver that exercises the provider tool loop."""
 
@@ -331,6 +337,8 @@ async def test_verification_harness_provider_loop_writes_checkpoints(tmp_path, m
     assert result.status == "completed"
     assert result.result is not None
     assert result.result["tool_history"] == ["write_current_code"]
+    assert result.result["telemetry"]["lean_ms"] >= 0
+    assert result.result["telemetry"]["provider_ms"] >= 0
     assert (tmp_path / "checkpoints" / "job_provider_1001.lean").exists()
 @pytest.mark.anyio
 async def test_verification_harness_fails_cleanly_without_provider_key(
@@ -652,6 +660,8 @@ async def test_verification_harness_short_circuits_on_successful_compile_tool(
     assert result.result is not None
     assert result.result["compile"]["success"] is True
     assert result.result["tool_history"] == ["write_current_code", "compile_current_code"]
+    assert result.result["telemetry"]["lean_ms"] >= 0
+    assert result.result["telemetry"]["provider_ms"] >= 0
 
 
 @pytest.mark.anyio

@@ -72,6 +72,14 @@ def _health_payload() -> HealthResponse:
     )
 
 
+def _require_lean_toolchain() -> None:
+    if not lean_workspace_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Lean toolchain is not ready.",
+        )
+
+
 def _formalizer_driver():
     return get_formalizer_driver(
         DEFAULT_DRIVER,
@@ -216,11 +224,21 @@ async def _run_verify_job(job_id: str, request: VerifyRequest) -> None:
         )
 
 
-@app.get("/health", response_model=HealthResponse, responses={500: {"model": ErrorResponse}})
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    responses={503: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
 async def health() -> HealthResponse:
     """Return service health and Lean workspace readiness."""
 
-    return _health_payload()
+    payload = _health_payload()
+    if not payload.lean_available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Lean toolchain is not ready.",
+        )
+    return payload
 
 
 @app.post(
@@ -231,7 +249,13 @@ async def health() -> HealthResponse:
 async def search(request: SearchRequest) -> SearchResponse:
     """Run deterministic retrieval without calling any LLM provider."""
 
-    return search_claim(request.raw_claim, request.domain)
+    try:
+        return search_claim(request.raw_claim, request.domain)
+    except Exception as exc:  # pragma: no cover - defensive deployment guard
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Search failed: {exc.__class__.__name__}: {exc}",
+        ) from exc
 
 
 @app.post(
@@ -253,12 +277,21 @@ async def formalize(request: FormalizeRequest) -> FormalizeResponse:
 @app.post(
     "/api/v2/compile",
     response_model=CompileResponse,
-    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={400: {"model": ErrorResponse}, 503: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
 async def compile_endpoint(request: CompileRequest) -> CompileResponse:
     """Compile Lean code directly with the local workspace toolchain."""
 
-    result = compile_check(request.lean_code)
+    _require_lean_toolchain()
+
+    try:
+        result = compile_check(request.lean_code)
+    except Exception as exc:  # pragma: no cover - defensive deployment guard
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Compilation failed: {exc.__class__.__name__}: {exc}",
+        ) from exc
+
     errors = list(result["errors"])
     if result["has_sorry"] and "Proof contains 'sorry'." not in errors:
         errors.append("Proof contains 'sorry'.")

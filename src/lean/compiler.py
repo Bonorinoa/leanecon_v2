@@ -7,12 +7,14 @@ import shutil
 import subprocess
 from pathlib import Path
 from uuid import uuid4
+from typing import Any
 
 from src.config import LEAN_TIMEOUT, LEAN_WORKSPACE
 
 AXIOM_LINE_RE = re.compile(r"uses axioms:\s*(.+)", re.IGNORECASE)
 AXIOM_NAME_RE = re.compile(r"[A-Za-z0-9_.']+")
 STANDARD_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
+LEAN_TOOLCHAIN_PROBE_TIMEOUT = 15
 
 
 def _temp_lean_path() -> Path:
@@ -24,11 +26,54 @@ def _temp_lean_path() -> Path:
 def lean_workspace_available() -> bool:
     """Return whether the local Lean workspace looks runnable."""
 
-    return (
-        LEAN_WORKSPACE.exists()
-        and (LEAN_WORKSPACE / "lake-manifest.json").exists()
-        and shutil.which("lake") is not None
-    )
+    return lean_workspace_probe()["available"]
+
+
+def lean_workspace_probe(*, timeout: int = LEAN_TOOLCHAIN_PROBE_TIMEOUT) -> dict[str, Any]:
+    """Probe whether the Lean workspace and lake toolchain are actually usable."""
+
+    if not LEAN_WORKSPACE.exists():
+        return {"available": False, "reason": "Lean workspace directory is missing."}
+
+    if not (LEAN_WORKSPACE / "lake-manifest.json").exists():
+        return {"available": False, "reason": "Lean workspace manifest is missing."}
+
+    if not any((LEAN_WORKSPACE / name).exists() for name in ("lakefile.toml", "lakefile.lean")):
+        return {"available": False, "reason": "Lake workspace configuration is missing."}
+
+    lake_path = shutil.which("lake")
+    if lake_path is None:
+        return {"available": False, "reason": "lake executable not found on PATH."}
+
+    try:
+        result = subprocess.run(
+            ["lake", "env", "lean", "--version"],
+            cwd=str(LEAN_WORKSPACE),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "available": False,
+            "reason": f"lake env lean --version timed out after {timeout}s.",
+            "lake_path": lake_path,
+        }
+    except FileNotFoundError:
+        return {"available": False, "reason": "lake executable not found on PATH."}
+
+    if result.returncode != 0:
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        if not output:
+            output = f"lake env lean --version exited with code {result.returncode}."
+        return {"available": False, "reason": output, "lake_path": lake_path}
+
+    return {
+        "available": True,
+        "reason": None,
+        "lake_path": lake_path,
+        "lean_version": result.stdout.strip() or result.stderr.strip(),
+    }
 
 
 def _relative_to_workspace(path: Path) -> str:
@@ -166,6 +211,11 @@ def compile_check(
     combined_output = "\n".join(
         part for part in (result["stdout"], result["stderr"]) if part
     ).strip()
+
+    if not result["success"] and not errors:
+        fallback_error = "\n".join(part for part in (result["stderr"], result["stdout"]) if part).strip()
+        if fallback_error:
+            errors.append(fallback_error)
 
     if has_sorry and "Proof contains 'sorry'." not in warnings:
         warnings.append("Proof contains 'sorry'.")

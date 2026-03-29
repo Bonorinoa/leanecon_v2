@@ -1,0 +1,52 @@
+name: ProverResearcher
+role: researcher
+model:
+  provider: ollama
+  endpoint: http://127.0.0.1:11434
+  name: mistral
+  temperature: 0.15
+schedule: nightly
+activation: after_prover_regression
+
+inputs:
+  - PROGRAM.md
+  - evals/prover_only.py
+  - evals/claim_sets/agentic_harness.jsonl
+  - evals/claim_sets/tier0_smoke.jsonl
+  - src/prover/prompts.py
+  - src/prover/fast_path.py
+  - src/prover/tool_tracker.py
+  - docs/REPL_VERIFICATION.md
+  - docs/REPL_AUDIT_DAY2.md
+
+responsibilities:
+  - Analyze REPL logs and tool budgets for prover drift.
+  - Optimize prover prompts and fast-path heuristics.
+  - Recommend tree-search and branch-pruning improvements.
+  - Keep the prover ratchet within the editable zone only.
+
+allowed_edits:
+  - src/prover/prompts.py
+  - src/prover/fast_path.py
+  - src/prover/tool_tracker.py
+  - evals/prover_only.py
+  - docs/PAPER.md
+  - docs/V2_BENCHMARK_BASELINE.md
+
+blocked_edits:
+  - PROGRAM.md
+  - docs/API_CONTRACT.md
+  - src/api.py
+  - src/models.py
+  - src/drivers/base.py
+  - src/config.py
+  - lean_workspace/**
+
+benchmark_commands:
+  - python -m evals.prover_only --claim-set tier0_smoke
+  - python -m evals.prover_only --claim-set agentic_harness
+
+outputs:
+  - prompt_patch
+  - fast_path_patch
+  - tool_budget_notes

@@ -1,0 +1,50 @@
+name: FormalizerResearcher
+role: researcher
+model:
+  provider: ollama
+  endpoint: http://127.0.0.1:11434
+  name: mistral
+  temperature: 0.1
+schedule: nightly
+activation: after_formalizer_regression
+
+inputs:
+  - PROGRAM.md
+  - evals/formalizer_only.py
+  - evals/claim_sets/tier1_core.jsonl
+  - evals/claim_sets/tier2_frontier.jsonl
+  - src/formalizer/prompts.py
+  - src/search/hints.py
+  - src/search/engine.py
+
+responsibilities:
+  - Analyze formalizer drift against the latest benchmark summaries.
+  - Propose prompt, hint, and retrieval optimizations.
+  - Keep changes inside the formalizer ratchet editable zone.
+  - Report whether pass@1 or semantic quality improved.
+
+allowed_edits:
+  - src/formalizer/prompts.py
+  - src/search/hints.py
+  - src/search/engine.py
+  - evals/formalizer_only.py
+  - docs/PAPER.md
+  - docs/V2_BENCHMARK_BASELINE.md
+
+blocked_edits:
+  - PROGRAM.md
+  - docs/API_CONTRACT.md
+  - src/api.py
+  - src/models.py
+  - src/drivers/base.py
+  - src/config.py
+  - lean_workspace/**
+
+benchmark_commands:
+  - python -m evals.formalizer_only --claim-set tier1_core
+  - python -m evals.formalizer_only --claim-set tier2_frontier
+
+outputs:
+  - prompt_patch
+  - hint_patch
+  - experiment_notes

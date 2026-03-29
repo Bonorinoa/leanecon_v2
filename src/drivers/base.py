@@ -67,8 +67,9 @@ class ProverDriver(Protocol):
     @property
     def name(self) -> str:
         """Human-readable provider name (e.g. 'mistral', 'gemini')."""
+        ...
 
-    async def prove(
+    def prove(
         self,
         *,
         system_prompt: str,
@@ -84,6 +85,7 @@ class ProverDriver(Protocol):
         DriverEvents for progress tracking.
 
         The driver MUST:
+        ...
         - Call on_tool_call for every tool call the LLM emits
         - Feed tool results back into the conversation
         - Yield DriverEvent(type="done") when the LLM signals completion
@@ -108,6 +110,7 @@ class FormalizerDriver(Protocol):
     @property
     def name(self) -> str:
         """Human-readable provider name."""
+        ...
 
     async def formalize(
         self,
@@ -121,6 +124,7 @@ class FormalizerDriver(Protocol):
         Returns the raw LLM output string. The formalizer module handles
         parsing, validation, and retry logic.
         """
+        ...
 
 
 _prover_drivers: dict[str, type[Any]] = {}

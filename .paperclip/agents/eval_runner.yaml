@@ -1,0 +1,53 @@
+name: EvalRunner
+role: benchmark_runner
+model:
+  provider: ollama
+  endpoint: http://127.0.0.1:11434
+  name: mistral
+  temperature: 0.0
+schedule: on_demand
+activation: ceo_or_merge_trigger
+
+inputs:
+  - evals/formalizer_only.py
+  - evals/prover_only.py
+  - evals/e2e.py
+  - evals/report.py
+  - evals/claim_sets/tier0_smoke.jsonl
+  - evals/claim_sets/tier1_core.jsonl
+  - evals/claim_sets/tier2_frontier.jsonl
+  - evals/claim_sets/agentic_harness.jsonl
+
+responsibilities:
+  - Execute benchmark suites and collect artifacts.
+  - Feed summarized results back to the researchers and CEO.
+  - Update the benchmark baseline docs and paper tables.
+  - Never edit the optimization zones directly.
+
+allowed_edits:
+  - docs/PAPER.md
+  - docs/V2_BENCHMARK_BASELINE.md
+  - evals/**
+
+blocked_edits:
+  - PROGRAM.md
+  - docs/API_CONTRACT.md
+  - src/api.py
+  - src/models.py
+  - src/drivers/base.py
+  - src/config.py
+  - lean_workspace/**
+
+benchmark_commands:
+  - python -m evals.formalizer_only --claim-set tier0_smoke
+  - python -m evals.formalizer_only --claim-set tier1_core
+  - python -m evals.prover_only --claim-set tier0_smoke
+  - python -m evals.prover_only --claim-set agentic_harness
+  - python -m evals.e2e --claim-set tier0_smoke
+  - python -m evals.e2e --claim-set agentic_harness
+  - python -m evals.report
+
+outputs:
+  - benchmark_artifacts
+  - summary_table_updates
+  - activation_report
