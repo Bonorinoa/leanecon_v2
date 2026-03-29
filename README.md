@@ -17,7 +17,12 @@ uvicorn src.api:app --reload
 ```
 
 The API contract lives in [docs/API_CONTRACT.md](docs/API_CONTRACT.md) and the
-system overview lives in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+system overview lives in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Lean
+workspace setup lives in [docs/LEAN4_GUIDE.md](docs/LEAN4_GUIDE.md).
+
+This repository is intentionally backend-only. External clients, including
+Lovable-hosted frontends, should integrate directly with the published API
+rather than shipping UI code from this repo.
 
 ## Status
 

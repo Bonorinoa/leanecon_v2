@@ -1,7 +1,9 @@
 # Contributing
 
 LeanEcon v2 favors small, explicit changes that preserve the public API
-contract and keep the deterministic Lean boundary easy to audit.
+contract and keep the deterministic Lean boundary easy to audit. The repo is
+backend-only; frontend clients should live outside this codebase and consume the
+published API directly.
 
 ## Local Validation
 
