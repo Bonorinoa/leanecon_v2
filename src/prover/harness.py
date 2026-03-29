@@ -8,13 +8,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from src.config import REPL_ENABLED
 from src.drivers.base import ProverDriver, ToolCall, ToolDefinition, ToolResult
 from src.lean import LeanREPLSession, compile_check
-from lean_interact.interface import LeanError
 from src.models import JobStatus
-from src.prover.fast_path import replace_sorry_with_tactic, suggest_fast_path_tactics
+from src.prover.fast_path import repl_fast_path, replace_sorry_with_tactic, suggest_fast_path_tactics
 from src.prover.file_controller import ProofFileController
 from src.prover.prompts import PROVER_SYSTEM_PROMPT, build_prover_user_prompt
+from src.prover.tools import REPLToolDispatcher
 from src.prover.tool_tracker import BudgetTracker
 from src.search import search_claim
 
@@ -31,95 +32,6 @@ def _extract_theorem_name(theorem_with_sorry: str) -> str:
             if len(parts) >= 2:
                 return parts[1]
     return "anonymous_theorem"
-
-
-def _try_repl_fast_path(
-    theorem_with_sorry: str,
-    tactics: list[str],
-    *,
-    job_id: str,
-) -> dict[str, Any]:
-    """Try to close a theorem stub through one LeanInteract session before fallback."""
-
-    report: dict[str, Any] = {
-        "used": False,
-        "success": False,
-        "attempts": [],
-        "fallback_reason": None,
-        "candidate_code": None,
-        "candidate_result": None,
-    }
-    if LeanREPLSession is None:
-        report["fallback_reason"] = "LeanREPLSession unavailable"
-        return report
-
-    try:
-        with LeanREPLSession() as session:
-            report["used"] = True
-            session.start_proof(theorem_with_sorry)
-            for step, tactic in enumerate(tactics, start=1):
-                response = session.apply_tactic(tactic)
-                if isinstance(response, LeanError):
-                    report["attempts"].append(
-                        {
-                            "step": step,
-                            "mode": "repl_fast_path",
-                            "tactic": tactic,
-                            "success": False,
-                            "proof_status": "LeanError",
-                            "errors": [response.message],
-                        }
-                    )
-                    continue
-
-                errors: list[str] = []
-                if response.has_errors():
-                    if hasattr(response, "get_errors"):
-                        errors = [message.data for message in response.get_errors()]
-                    proof_status = getattr(response, "proof_status", "Incomplete")
-                    report["attempts"].append(
-                        {
-                            "step": step,
-                            "mode": "repl_fast_path",
-                            "tactic": tactic,
-                            "success": False,
-                            "proof_status": proof_status,
-                            "errors": errors,
-                        }
-                    )
-                    continue
-
-                proof_status = getattr(response, "proof_status", "Completed")
-                report["attempts"].append(
-                    {
-                        "step": step,
-                        "mode": "repl_fast_path",
-                        "tactic": tactic,
-                        "success": True,
-                        "proof_status": proof_status,
-                        "errors": [],
-                    }
-                )
-                if proof_status != "Completed":
-                    continue
-
-                candidate_code = session.materialize_proof()
-                candidate_result = session.verify_materialized_proof(
-                    filename=f"{job_id}_fast_{step}.lean",
-                )
-                if not candidate_result["success"]:
-                    report["attempts"][-1]["success"] = False
-                    report["attempts"][-1]["errors"] = candidate_result.get("errors", [])
-                    continue
-                report["success"] = True
-                report["candidate_code"] = candidate_code
-                report["candidate_result"] = candidate_result
-                return report
-            report["fallback_reason"] = "REPL session completed without closing the theorem"
-    except Exception as exc:
-        report["fallback_reason"] = f"{type(exc).__name__}: {exc}"
-
-    return report
 
 
 @dataclass
@@ -186,49 +98,63 @@ class VerificationHarness:
 
         attempts: list[dict[str, Any]] = []
         fast_path_tactics = suggest_fast_path_tactics(current_code)
-        repl_report = _try_repl_fast_path(
-            current_code,
-            fast_path_tactics,
-            job_id=job_id,
-        )
-        if repl_report["used"]:
-            attempts.extend(repl_report["attempts"])
-            if on_progress:
-                on_progress(
-                    "repl_fast_path",
-                    {
-                        "success": repl_report["success"],
-                        "attempts": repl_report["attempts"],
-                        "fallback_reason": repl_report["fallback_reason"],
-                    },
-                )
-        if repl_report["success"]:
-            candidate = repl_report["candidate_code"]
-            candidate_result = repl_report["candidate_result"]
-            if candidate is None or candidate_result is None:
-                raise RuntimeError("LeanInteract reported success without a materialized proof.")
-            self.file_controller.write_current_code(job_id, candidate)
-            self.file_controller.checkpoint(job_id, len(repl_report["attempts"]))
-            return JobStatus(
-                id=job_id,
-                status="completed",
-                created_at=created_at,
-                updated_at=_utc_now(),
-                result={
-                    "status": "verified",
-                    "theorem": theorem_name,
-                    "verified_code": candidate,
-                    "compile": candidate_result,
-                    "attempts": attempts,
-                    "repl_fast_path": repl_report,
-                    "tool_history": list(self.budget_tracker.tool_history),
-                    "tool_budget": self.budget_tracker.snapshot(),
-                },
-                error=None,
-            )
+        repl_report: dict[str, Any] = {
+            "used": False,
+            "success": False,
+            "attempts": [],
+            "fallback_reason": None,
+            "candidate_code": None,
+            "candidate_result": None,
+        }
 
-        if repl_report["fallback_reason"] and on_progress:
-            on_progress("repl_fast_path_fallback", {"reason": repl_report["fallback_reason"]})
+        if REPL_ENABLED and LeanREPLSession is not None:
+            try:
+                with LeanREPLSession() as repl:
+                    repl_report = await repl_fast_path(
+                        repl,
+                        current_code,
+                        max_attempts=max_steps,
+                        job_id=job_id,
+                    ) or repl_report
+                    if repl_report["attempts"]:
+                        attempts.extend(repl_report["attempts"])
+                    if on_progress:
+                        on_progress(
+                            "repl_fast_path",
+                            {
+                                "success": repl_report["success"],
+                                "attempts": repl_report["attempts"],
+                                "fallback_reason": repl_report["fallback_reason"],
+                            },
+                        )
+                    if repl_report["success"]:
+                        candidate = repl_report["candidate_code"]
+                        candidate_result = repl_report["candidate_result"]
+                        if candidate is None or candidate_result is None:
+                            raise RuntimeError("LeanInteract reported success without a materialized proof.")
+                        self.file_controller.write_current_code(job_id, candidate)
+                        self.file_controller.checkpoint(job_id, len(repl_report["attempts"]))
+                        return JobStatus(
+                            id=job_id,
+                            status="completed",
+                            created_at=created_at,
+                            updated_at=_utc_now(),
+                            result={
+                                "status": "verified",
+                                "theorem": theorem_name,
+                                "verified_code": candidate,
+                                "compile": candidate_result,
+                                "attempts": attempts,
+                                "repl_fast_path": repl_report,
+                                "tool_history": list(self.budget_tracker.tool_history),
+                                "tool_budget": self.budget_tracker.snapshot(),
+                            },
+                            error=None,
+                        )
+            except Exception as exc:
+                repl_report["fallback_reason"] = f"{type(exc).__name__}: {exc}"
+                if on_progress:
+                    on_progress("repl_fast_path_fallback", {"reason": repl_report["fallback_reason"]})
 
         for step, tactic in enumerate(fast_path_tactics, start=1):
             candidate = replace_sorry_with_tactic(current_code, tactic)
@@ -272,6 +198,30 @@ class VerificationHarness:
                     error=None,
                 )
 
+        repl_provider_result: JobStatus | None = None
+        if REPL_ENABLED and LeanREPLSession is not None:
+            try:
+                with LeanREPLSession() as repl:
+                    dispatcher = REPLToolDispatcher(
+                        repl=repl,
+                        theorem_code=theorem_with_sorry,
+                        file_controller=self.file_controller,
+                        job_id=job_id,
+                    )
+                    await dispatcher.initialize()
+                    repl_provider_result = await self._provider_attempt(
+                        job_id,
+                        theorem_with_sorry,
+                        on_progress,
+                        max_steps=max_steps,
+                        repl_dispatcher=dispatcher,
+                    )
+                    if repl_provider_result is not None and repl_provider_result.status == "completed":
+                        return repl_provider_result
+            except Exception as exc:
+                if on_progress:
+                    on_progress("repl_provider_fallback", {"reason": f"{type(exc).__name__}: {exc}"})
+
         provider_result = await self._provider_attempt(
             job_id,
             theorem_with_sorry,
@@ -293,7 +243,7 @@ class VerificationHarness:
                 "theorem": theorem_name,
                 "compile": initial_check,
                 "attempts": attempts,
-                    "repl_fast_path": repl_report,
+                "repl_fast_path": repl_report,
                 "tool_history": list(self.budget_tracker.tool_history),
                 "tool_budget": self.budget_tracker.snapshot(),
             },
@@ -307,6 +257,7 @@ class VerificationHarness:
         on_progress: Callable[[str, dict[str, Any]], None] | None,
         *,
         max_steps: int,
+        repl_dispatcher: REPLToolDispatcher | None = None,
     ) -> JobStatus | None:
         """Use the configured provider for tool-mediated proof search."""
 
@@ -323,6 +274,15 @@ class VerificationHarness:
                 return ToolResult(tool_call.id, "Tool budget exhausted.", is_error=True)
 
             self.budget_tracker.record(tool_call.name)
+            if repl_dispatcher is not None and tool_call.name in {
+                "read_current_code",
+                "compile_current_code",
+                "get_goals",
+                "write_current_code",
+                "apply_tactic",
+            }:
+                return repl_dispatcher.handle_tool_call(tool_call)
+
             if tool_call.name == "read_current_code":
                 return ToolResult(tool_call.id, self.file_controller.read_current_code(job_id))
             if tool_call.name == "compile_current_code":
@@ -372,7 +332,12 @@ class VerificationHarness:
             ),
             ToolDefinition(
                 name="compile_current_code",
-                description="Compile the current Lean theorem file and inspect diagnostics.",
+                description="Inspect the current REPL goal state or compile the current Lean theorem file.",
+                parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+            ToolDefinition(
+                name="get_goals",
+                description="Inspect the current REPL goal state.",
                 parameters={"type": "object", "properties": {}, "additionalProperties": False},
             ),
             ToolDefinition(
@@ -397,7 +362,7 @@ class VerificationHarness:
             ),
             ToolDefinition(
                 name="apply_tactic",
-                description="Replace the first `sorry` with a tactic candidate.",
+                description="Apply one tactic to the active REPL proof state or rewrite the current file.",
                 parameters={
                     "type": "object",
                     "properties": {"tactic": {"type": "string"}},
@@ -426,7 +391,7 @@ class VerificationHarness:
             attempts.append({"event": event.type, "data": event.data})
             if on_progress:
                 on_progress("provider", {"event_type": event.type, "data": event.data})
-            if event.type == "tool_result" and isinstance(event.data, dict):
+            if repl_dispatcher is None and event.type == "tool_result" and isinstance(event.data, dict):
                 if event.data.get("name") == "compile_current_code":
                     content = event.data.get("content")
                     if isinstance(content, str):
@@ -459,7 +424,11 @@ class VerificationHarness:
             if event.type == "done":
                 break
 
-        current_code = self.file_controller.read_current_code(job_id)
+        current_code = (
+            repl_dispatcher.build_final_code()
+            if repl_dispatcher is not None
+            else self.file_controller.read_current_code(job_id)
+        )
         final_check = compile_check(current_code, filename=f"{job_id}_provider_final.lean")
         if final_check["success"]:
             return JobStatus(

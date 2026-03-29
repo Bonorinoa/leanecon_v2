@@ -6,6 +6,7 @@ import InputPanel from "./components/InputPanel";
 import ProgressPanel from "./components/ProgressPanel";
 import SettingsModal from "./components/SettingsModal";
 import TheoremPanel from "./components/TheoremPanel";
+import EvalDashboard from "./pages/EvalDashboard";
 import { useVerification } from "./hooks/useVerification";
 import { DEFAULT_API_URL, DEFAULT_TIMEOUT, ensureTrailingSlash } from "./utils";
 
@@ -61,6 +62,7 @@ async function fetchHealth(apiUrl) {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState("demo");
   const [settings, setSettings] = useState(readInitialSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [health, setHealth] = useState(null);
@@ -158,58 +160,68 @@ export default function App() {
         connected={Boolean(health) && !healthError}
         provider={health?.driver}
         version={health?.version}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
       {globalError ? (
-        <div className="rounded-3xl border border-red-400/30 bg-red-500/10 px-4 py-4 text-sm text-red-100">
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-800 shadow-sm">
           {globalError}
         </div>
       ) : null}
 
-      <main className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.9fr)]">
-        <InputPanel
-          mode={verification.mode}
-          onModeChange={verification.setMode}
-          claimText={verification.claimText}
-          onClaimTextChange={verification.setClaimText}
-          selectedPreamble={verification.selectedPreamble}
-          onSelectedPreambleChange={verification.setSelectedPreamble}
-          preambleSuggestions={preambleSuggestions}
-          onSearch={verification.searchClaim}
-          onRunPipeline={verification.runPipeline}
-          busy={verification.isBusy}
-          workflowState={verification.workflowState}
-        />
+      {activeTab === "demo" ? (
+        <>
+          <main className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.9fr)]">
+            <InputPanel
+              mode={verification.mode}
+              onModeChange={verification.setMode}
+              claimText={verification.claimText}
+              onClaimTextChange={verification.setClaimText}
+              selectedPreamble={verification.selectedPreamble}
+              onSelectedPreambleChange={verification.setSelectedPreamble}
+              preambleSuggestions={preambleSuggestions}
+              onSearch={verification.searchClaim}
+              onRunPipeline={verification.runPipeline}
+              busy={verification.isBusy}
+              workflowState={verification.workflowState}
+            />
 
-        <TheoremPanel
-          theoremText={verification.theoremText}
-          onTheoremTextChange={verification.setTheoremText}
-          displayScope={verification.displayScope}
-          integrityWarnings={verification.integrityWarnings}
-          searchContext={verification.searchContext}
-          formalizeResponse={verification.formalizeResponse}
-          onApprove={verification.approveAndVerify}
-          busy={verification.isBusy}
-        />
+            <TheoremPanel
+              theoremText={verification.theoremText}
+              onTheoremTextChange={verification.setTheoremText}
+              displayScope={verification.displayScope}
+              integrityWarnings={verification.integrityWarnings}
+              searchContext={verification.searchContext}
+              formalizeResponse={verification.formalizeResponse}
+              onApprove={verification.approveAndVerify}
+              busy={verification.isBusy}
+            />
 
-        <ProgressPanel
-          workflowState={verification.workflowState}
-          timelineSteps={verification.timelineSteps}
-          streamConnected={verification.streamConnected}
-          streamError={verification.streamError}
-          job={verification.job}
-          toolCallCount={verification.toolCallCount}
-          explanation={verification.explanation}
-          explanationOpen={verification.explanationOpen}
-          onToggleExplanation={verification.setExplanationOpen}
-          onExplain={verification.requestExplanation}
-          onRetry={verification.retryVerification}
-          busy={verification.isBusy}
-        />
-      </main>
+            <ProgressPanel
+              workflowState={verification.workflowState}
+              timelineSteps={verification.timelineSteps}
+              streamConnected={verification.streamConnected}
+              streamError={verification.streamError}
+              job={verification.job}
+              toolCallCount={verification.toolCallCount}
+              explanation={verification.explanation}
+              explanationOpen={verification.explanationOpen}
+              onToggleExplanation={verification.setExplanationOpen}
+              onExplain={verification.requestExplanation}
+              onRetry={verification.retryVerification}
+              busy={verification.isBusy}
+            />
+          </main>
 
-      <HistoryBar entries={historyEntries} activeId={activeHistoryId} onSelect={handleSelectHistory} />
+          <HistoryBar entries={historyEntries} activeId={activeHistoryId} onSelect={handleSelectHistory} />
+        </>
+      ) : (
+        <main className="flex-1 w-full bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+          <EvalDashboard />
+        </main>
+      )}
 
       <SettingsModal
         isOpen={settingsOpen}

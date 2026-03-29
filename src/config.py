@@ -34,6 +34,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LEAN_RUN_CODE = os.getenv("LEAN_RUN_CODE", "lean_run_code")
 LAKE_BUILD = os.getenv("LAKE_BUILD", "lake build")
 LEAN_TIMEOUT = int(os.getenv("LEAN_TIMEOUT", "60"))
+REPL_ENABLED = os.getenv("REPL_ENABLED", "true").lower() == "true"
 
 # --- Proving ---
 MAX_PROVE_STEPS = int(os.getenv("MAX_PROVE_STEPS", "64"))

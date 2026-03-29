@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import re
+from typing import Any
+
+from lean_interact.interface import LeanError
+
+from src.lean import LeanREPLSession
 
 
 def replace_sorry_with_tactic(theorem_with_sorry: str, tactic: str) -> str | None:
@@ -54,3 +59,109 @@ def suggest_fast_path_tactics(theorem_with_sorry: str) -> list[str]:
         seen.add(suggestion)
         deduped.append(suggestion)
     return deduped
+
+
+async def repl_fast_path(
+    repl: LeanREPLSession,
+    theorem_code: str,
+    *,
+    max_attempts: int = 30,
+    job_id: str = "repl_fast_path",
+) -> dict[str, Any] | None:
+    """Try deterministic tactics against one LeanInteract session."""
+
+    report: dict[str, Any] = {
+        "used": False,
+        "success": False,
+        "attempts": [],
+        "fallback_reason": None,
+        "candidate_code": None,
+        "candidate_result": None,
+    }
+
+    try:
+        state = repl.start_proof(theorem_code)
+        report["used"] = True
+        if state.is_solved:
+            candidate_result = repl.verify_materialized_proof(filename=f"{job_id}_fast_0.lean")
+            report["attempts"].append(
+                {
+                    "step": 0,
+                    "mode": "repl_fast_path",
+                    "tactic": "trivial",
+                    "success": candidate_result["success"],
+                    "proof_status": "Completed",
+                    "errors": candidate_result.get("errors", []),
+                }
+            )
+            if candidate_result["success"]:
+                report["success"] = True
+                report["candidate_code"] = repl.materialize_proof()
+                report["candidate_result"] = candidate_result
+                return report
+
+        tactics = suggest_fast_path_tactics(theorem_code)[:max_attempts]
+        for step, tactic in enumerate(tactics, start=1):
+            if step > 1:
+                state = repl.start_proof(theorem_code)
+
+            response = repl.apply_tactic(state.state_id, tactic)
+            if isinstance(response, LeanError):
+                report["attempts"].append(
+                    {
+                        "step": step,
+                        "mode": "repl_fast_path",
+                        "tactic": tactic,
+                        "success": False,
+                        "proof_status": "LeanError",
+                        "errors": [response.message],
+                    }
+                )
+                continue
+
+            errors: list[str] = []
+            if response.has_errors():
+                if hasattr(response, "get_errors"):
+                    errors = [message.data for message in response.get_errors()]
+                report["attempts"].append(
+                    {
+                        "step": step,
+                        "mode": "repl_fast_path",
+                        "tactic": tactic,
+                        "success": False,
+                        "proof_status": getattr(response, "proof_status", "Incomplete"),
+                        "errors": errors,
+                    }
+                )
+                continue
+
+            proof_status = getattr(response, "proof_status", "Completed")
+            report["attempts"].append(
+                {
+                    "step": step,
+                    "mode": "repl_fast_path",
+                    "tactic": tactic,
+                    "success": True,
+                    "proof_status": proof_status,
+                    "errors": [],
+                }
+            )
+            if proof_status != "Completed":
+                continue
+
+            candidate_result = repl.verify_materialized_proof(filename=f"{job_id}_fast_{step}.lean")
+            if not candidate_result["success"]:
+                report["attempts"][-1]["success"] = False
+                report["attempts"][-1]["errors"] = candidate_result.get("errors", [])
+                continue
+
+            report["success"] = True
+            report["candidate_code"] = repl.materialize_proof()
+            report["candidate_result"] = candidate_result
+            return report
+
+        report["fallback_reason"] = "REPL session completed without closing the theorem"
+    except Exception as exc:
+        report["fallback_reason"] = f"{type(exc).__name__}: {exc}"
+
+    return report

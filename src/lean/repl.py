@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Any
 
 from lean_interact import AutoLeanServer, Command, LeanREPLConfig, LocalProject, ProofStep
 from lean_interact.interface import CommandResponse, LeanError, ProofStepResponse
@@ -37,12 +38,33 @@ class ProofSessionState:
     theorem_with_sorry: str
     proof_state: int
     goal: str
+    goals: list[str] = field(default_factory=list)
     tactics: list[str] = field(default_factory=list)
     completed: bool = False
+
+    @property
+    def state_id(self) -> int:
+        return self.proof_state
+
+    @property
+    def is_solved(self) -> bool:
+        return self.completed or not self.goals
 
     def materialized_code(self) -> str:
         replacement = "\n".join(self.tactics) if self.tactics else "sorry"
         return _replace_standalone_sorry(self.theorem_with_sorry, replacement)
+
+
+@dataclass
+class TacticResult:
+    """Compatibility wrapper for tactic execution results."""
+
+    success: bool
+    state_id: int
+    goals: list[str] = field(default_factory=list)
+    is_solved: bool = False
+    proof_status: str = ""
+    error: str | None = None
 
 
 class LeanREPLSession:
@@ -55,6 +77,13 @@ class LeanREPLSession:
 
     @property
     def proof_state(self) -> ProofSessionState | None:
+        return self._proof_state
+
+    def get_goal_state(self, state_id: int | None = None) -> ProofSessionState:
+        if self._proof_state is None:
+            raise RuntimeError("Call start_proof() before get_goal_state().")
+        if state_id is not None and state_id != self._proof_state.state_id:
+            raise RuntimeError("Requested proof state does not match the active REPL state.")
         return self._proof_state
 
     def run_command(
@@ -98,17 +127,29 @@ class LeanREPLSession:
             theorem_with_sorry=theorem_with_sorry,
             proof_state=sorry.proof_state,
             goal=sorry.goal,
+            goals=[sorry.goal] if sorry.goal else [],
         )
         return self._proof_state
 
     def apply_tactic(
         self,
-        tactic: str,
-        *,
+        *args: Any,
         timeout: float | None = None,
     ) -> ProofStepResponse | LeanError:
         if self._proof_state is None:
             raise RuntimeError("Call start_proof() before apply_tactic().")
+
+        if len(args) == 1:
+            state_id = self._proof_state.state_id
+            tactic = str(args[0])
+        elif len(args) == 2:
+            state_id = int(args[0])
+            tactic = str(args[1])
+        else:
+            raise TypeError("apply_tactic() expects tactic or (state_id, tactic).")
+
+        if state_id != self._proof_state.state_id:
+            raise RuntimeError("Requested proof state does not match the active REPL state.")
 
         response = self._server.run(
             ProofStep(proof_state=self._proof_state.proof_state, tactic=tactic),
@@ -122,6 +163,7 @@ class LeanREPLSession:
 
         self._proof_state.proof_state = response.proof_state
         self._proof_state.goal = "\n\n".join(response.goals)
+        self._proof_state.goals = list(response.goals)
         self._proof_state.tactics.append(tactic)
         self._proof_state.completed = response.proof_status == "Completed"
         return response
@@ -150,3 +192,6 @@ class LeanREPLSession:
     def __exit__(self, exc_type, exc, tb) -> bool:
         self.kill()
         return False
+
+
+LeanREPL = LeanREPLSession
