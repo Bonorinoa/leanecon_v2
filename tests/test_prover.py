@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 
+from lean_interact.interface import LeanError
 from src.drivers.base import DriverConfig, DriverEvent, ToolCall, ToolResult
 from src.drivers.registry import get_prover_driver
 from src.prover import VerificationHarness
@@ -30,6 +32,198 @@ async def test_verification_harness_solves_simple_arithmetic(tmp_path) -> None:
     assert result.status == "completed"
     assert result.result is not None
     assert result.result["status"] == "verified"
+
+
+class FakeLeanREPLSession:
+    """Small fake REPL session for proving harness regression tests."""
+
+    instances: int = 0
+    start_calls: int = 0
+    tactic_calls: list[str] = []
+    verify_calls: list[str] = []
+
+    def __init__(self, *args, **kwargs):
+        _ = args
+        _ = kwargs
+        type(self).instances += 1
+        self.call_count = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        _ = exc_type
+        _ = exc
+        _ = tb
+        return False
+
+    def start_proof(self, theorem_with_sorry: str, *, timeout=None):
+        _ = timeout
+        type(self).start_calls += 1
+        self.theorem_with_sorry = theorem_with_sorry
+        return SimpleNamespace(goal="⊢ goal")
+
+    def apply_tactic(self, tactic: str, *, timeout=None):
+        _ = timeout
+        type(self).tactic_calls.append(tactic)
+        self.call_count += 1
+        self.tactic = tactic
+        proof_status = "Incomplete: open goals remain" if self.call_count == 1 else "Completed"
+        return SimpleNamespace(has_errors=lambda: False, proof_status=proof_status)
+
+    def materialize_proof(self) -> str:
+        return self.theorem_with_sorry.replace("sorry", self.tactic)
+
+    def verify_materialized_proof(self, *, filename: str = "repl_verified.lean", timeout=None):
+        _ = filename
+        _ = timeout
+        type(self).verify_calls.append(filename)
+        return {
+            "success": True,
+            "errors": [],
+            "warnings": [],
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+        }
+
+
+@pytest.mark.anyio
+async def test_verification_harness_uses_repl_fast_path(tmp_path, monkeypatch) -> None:
+    """The fast path should prefer LeanInteract before subprocess compilation."""
+
+    compile_calls: list[str | None] = []
+    FakeLeanREPLSession.instances = 0
+    FakeLeanREPLSession.start_calls = 0
+    FakeLeanREPLSession.tactic_calls = []
+    FakeLeanREPLSession.verify_calls = []
+
+    def fake_compile_check(lean_code: str, *, timeout=None, filename=None, check_axioms=False):
+        _ = lean_code
+        _ = timeout
+        _ = check_axioms
+        compile_calls.append(filename)
+        return {
+            "success": False,
+            "has_sorry": True,
+            "axiom_warnings": [],
+            "output": "",
+            "errors": [],
+            "warnings": [],
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+        }
+
+    monkeypatch.setattr("src.prover.harness.compile_check", fake_compile_check)
+    monkeypatch.setattr("src.prover.harness.suggest_fast_path_tactics", lambda _code: ["simp", "norm_num"])
+    monkeypatch.setattr("src.prover.harness.LeanREPLSession", FakeLeanREPLSession)
+
+    harness = VerificationHarness(
+        driver=get_prover_driver("mistral", DriverConfig(model="mistral-small", api_key=None)),
+        file_controller=ProofFileController(workspace_root=tmp_path),
+        budget_tracker=BudgetTracker(),
+    )
+    result = await harness.verify(
+        "import Mathlib\n\n" "theorem repl_fast_path_demo : 1 + 1 = 2 := by\n" "  sorry\n",
+        "job_repl_fast_path",
+    )
+
+    assert result.status == "completed"
+    assert result.result is not None
+    assert result.result["attempts"][0]["mode"] == "repl_fast_path"
+    assert result.result["attempts"][1]["mode"] == "repl_fast_path"
+    assert result.result["attempts"][1]["proof_status"] == "Completed"
+    assert FakeLeanREPLSession.instances == 1
+    assert FakeLeanREPLSession.start_calls == 1
+    assert FakeLeanREPLSession.tactic_calls == ["simp", "norm_num"]
+    assert FakeLeanREPLSession.verify_calls == ["job_repl_fast_path_fast_2.lean"]
+    assert compile_calls == ["job_repl_fast_path_initial.lean"]
+
+
+class FailingLeanREPLSession:
+    """Fake REPL session that never closes the theorem."""
+
+    instances: int = 0
+    start_calls: int = 0
+    tactic_calls: list[str] = []
+
+    def __init__(self, *args, **kwargs):
+        _ = args
+        _ = kwargs
+        type(self).instances += 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        _ = exc_type
+        _ = exc
+        _ = tb
+        return False
+
+    def start_proof(self, theorem_with_sorry: str, *, timeout=None):
+        _ = timeout
+        _ = theorem_with_sorry
+        type(self).start_calls += 1
+        return SimpleNamespace(goal="⊢ goal")
+
+    def apply_tactic(self, tactic: str, *, timeout=None):
+        _ = timeout
+        type(self).tactic_calls.append(tactic)
+        return LeanError(message=f"tactic failed: {tactic}")
+
+
+@pytest.mark.anyio
+async def test_verification_harness_falls_back_after_failed_repl_pass(tmp_path, monkeypatch) -> None:
+    """A failed REPL pass should record the error and fall back once, not reopen sessions."""
+
+    compile_calls: list[str | None] = []
+    FailingLeanREPLSession.instances = 0
+    FailingLeanREPLSession.start_calls = 0
+    FailingLeanREPLSession.tactic_calls = []
+
+    def fake_compile_check(lean_code: str, *, timeout=None, filename=None, check_axioms=False):
+        _ = lean_code
+        _ = timeout
+        _ = check_axioms
+        compile_calls.append(filename)
+        success = filename == "job_repl_fallback_fast_1.lean"
+        return {
+            "success": success,
+            "has_sorry": not success,
+            "axiom_warnings": [],
+            "output": "",
+            "errors": [],
+            "warnings": [],
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+        }
+
+    monkeypatch.setattr("src.prover.harness.compile_check", fake_compile_check)
+    monkeypatch.setattr("src.prover.harness.suggest_fast_path_tactics", lambda _code: ["norm_num"])
+    monkeypatch.setattr("src.prover.harness.LeanREPLSession", FailingLeanREPLSession)
+
+    harness = VerificationHarness(
+        driver=get_prover_driver("mistral", DriverConfig(model="mistral-small", api_key=None)),
+        file_controller=ProofFileController(workspace_root=tmp_path),
+        budget_tracker=BudgetTracker(),
+    )
+    result = await harness.verify(
+        "import Mathlib\n\n" "theorem repl_fallback_demo : 1 + 1 = 2 := by\n" "  sorry\n",
+        "job_repl_fallback",
+    )
+
+    assert result.status == "completed"
+    assert result.result is not None
+    assert result.result["repl_fast_path"]["success"] is False
+    assert result.result["repl_fast_path"]["attempts"][0]["success"] is False
+    assert result.result["repl_fast_path"]["attempts"][0]["errors"] == ["tactic failed: norm_num"]
+    assert FailingLeanREPLSession.instances == 1
+    assert FailingLeanREPLSession.start_calls == 1
+    assert FailingLeanREPLSession.tactic_calls == ["norm_num"]
+    assert compile_calls == ["job_repl_fallback_initial.lean", "job_repl_fallback_fast_1.lean"]
 class FakeRewriteDriver:
     """Small fake driver that exercises the provider tool loop."""
 
