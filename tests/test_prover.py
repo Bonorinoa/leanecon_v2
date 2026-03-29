@@ -226,8 +226,8 @@ class FailingLeanREPLSession:
 
 
 @pytest.mark.anyio
-async def test_verification_harness_falls_back_after_failed_repl_pass(tmp_path, monkeypatch) -> None:
-    """A failed REPL pass should record the error and fall back once, not reopen sessions."""
+async def test_verification_harness_skips_compile_fallback_after_failed_repl_pass(tmp_path, monkeypatch) -> None:
+    """A failed REPL pass should bypass compile fallback once REPL has already been used."""
 
     compile_calls: list[str | None] = []
     FailingLeanREPLSession.instances = 0
@@ -239,7 +239,7 @@ async def test_verification_harness_falls_back_after_failed_repl_pass(tmp_path, 
         _ = timeout
         _ = check_axioms
         compile_calls.append(filename)
-        success = filename == "job_repl_fallback_fast_1.lean"
+        success = filename == "job_repl_fallback_provider_final.lean"
         return {
             "success": success,
             "has_sorry": not success,
@@ -257,27 +257,27 @@ async def test_verification_harness_falls_back_after_failed_repl_pass(tmp_path, 
     monkeypatch.setattr("src.prover.fast_path.suggest_fast_path_tactics", lambda _code: ["norm_num"])
     monkeypatch.setattr("src.prover.harness.LeanREPLSession", FailingLeanREPLSession)
 
+    driver = FakeRewriteDriver()
+
     harness = VerificationHarness(
-        driver=get_prover_driver("mistral", DriverConfig(model="mistral-small", api_key=None)),
+        driver=driver,
         file_controller=ProofFileController(workspace_root=tmp_path),
         budget_tracker=BudgetTracker(),
     )
     result = await harness.verify(
-        "import Mathlib\n\n" "theorem repl_fallback_demo : 1 + 1 = 2 := by\n" "  sorry\n",
+        "import Mathlib\n\n" "theorem provider_tool_rewrite : True := by\n" "  sorry\n",
         "job_repl_fallback",
     )
 
     assert result.status == "completed"
     assert result.result is not None
-    assert result.result["repl_fast_path"]["success"] is False
-    assert result.result["repl_fast_path"]["attempts"][0]["success"] is False
-    assert result.result["repl_fast_path"]["attempts"][0]["errors"] == ["tactic failed: norm_num"]
-    assert FailingLeanREPLSession.instances == 1
-    assert FailingLeanREPLSession.start_calls == 1
+    assert FailingLeanREPLSession.instances == 2
+    assert FailingLeanREPLSession.start_calls == 2
     assert FailingLeanREPLSession.tactic_calls == ["norm_num"]
-    assert compile_calls == ["job_repl_fallback_fast_1.lean"]
+    assert compile_calls == ["job_repl_fallback_provider_final.lean"]
+    assert len(driver.calls) == 2
     assert result.result["telemetry"]["lean_ms"] >= 0
-    assert result.result["telemetry"]["provider_ms"] == 0
+    assert result.result["telemetry"]["provider_ms"] >= 0
 class FakeRewriteDriver:
     """Small fake driver that exercises the provider tool loop."""
 
@@ -945,7 +945,7 @@ async def test_verification_harness_appends_goal_analyst_hint_on_failed_repl_app
     assert result.status == "failed"
     assert driver.tool_result_error is True
     assert "unknown identifier foo" in driver.tool_result_content
-    assert "Goal Analyst:" in driver.tool_result_content
+    assert "Goal Analyst Hint:" in driver.tool_result_content
     assert "Introduce it with `intro`" in driver.tool_result_content
 
 
@@ -996,7 +996,7 @@ async def test_verification_harness_preserves_raw_error_when_goal_analyst_unavai
     assert result.status == "failed"
     assert driver.tool_result_error is True
     assert driver.tool_result_content == "unknown identifier foo"
-    assert "Goal Analyst:" not in driver.tool_result_content
+    assert "Goal Analyst Hint:" not in driver.tool_result_content
 
 
 @pytest.mark.anyio

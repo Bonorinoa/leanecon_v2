@@ -520,7 +520,7 @@ class VerificationHarness:
                         if hint:
                             return ToolResult(
                                 tool_call.id,
-                                f"{result.content}\n\nGoal Analyst: {hint}",
+                                f"{result.content}\n\nGoal Analyst Hint: {hint}",
                                 is_error=True,
                             )
                     return result

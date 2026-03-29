@@ -187,41 +187,15 @@ class REPLToolDispatcher:
     def _apply_tactic(self, call_id: str, tactic: str) -> ToolResult:
         state = self._current_state()
         response = self.repl.apply_tactic(state.state_id, tactic)
-        if isinstance(response, LeanError):
+        if isinstance(response, LeanError) or response.has_errors():
             error_messages = _collect_error_messages(response)
-            if _is_retryable_syntax_error(error_messages):
-                repaired_tactic = _retry_with_syntax_fixer(tactic, error_messages, list(state.goals))
-                if repaired_tactic is not None:
-                    retry_response = self.repl.apply_tactic(state.state_id, repaired_tactic)
-                    if not isinstance(retry_response, LeanError) and not retry_response.has_errors():
-                        self.current_state_id = retry_response.proof_state
-                        self.tactic_history.append(repaired_tactic)
-                        self.goal_history.append(list(retry_response.goals))
-                        self._sync_current_code()
-
-                        if getattr(retry_response, "proof_status", "") == "Completed":
-                            return ToolResult(call_id, "Proof complete! All goals solved.")
-
-                        return ToolResult(call_id, _format_goals(list(retry_response.goals)))
-            content = "\n".join(error_messages) if error_messages else response.message
-            return ToolResult(call_id, content, is_error=True)
-        if response.has_errors():
-            error_messages = _collect_error_messages(response)
-            if _is_retryable_syntax_error(error_messages):
-                repaired_tactic = _retry_with_syntax_fixer(tactic, error_messages, list(state.goals))
-                if repaired_tactic is not None:
-                    retry_response = self.repl.apply_tactic(state.state_id, repaired_tactic)
-                    if not isinstance(retry_response, LeanError) and not retry_response.has_errors():
-                        self.current_state_id = retry_response.proof_state
-                        self.tactic_history.append(repaired_tactic)
-                        self.goal_history.append(list(retry_response.goals))
-                        self._sync_current_code()
-
-                        if getattr(retry_response, "proof_status", "") == "Completed":
-                            return ToolResult(call_id, "Proof complete! All goals solved.")
-
-                        return ToolResult(call_id, _format_goals(list(retry_response.goals)))
-            content = "\n".join(error_messages) if error_messages else f"Tactic failed: {tactic}"
+            repaired_result = self._retry_repaired_tactic(state.state_id, tactic, error_messages, list(state.goals), call_id)
+            if repaired_result is not None:
+                return repaired_result
+            if isinstance(response, LeanError):
+                content = "\n".join(error_messages) if error_messages else response.message
+            else:
+                content = "\n".join(error_messages) if error_messages else f"Tactic failed: {tactic}"
             return ToolResult(call_id, content, is_error=True)
 
         self.current_state_id = response.proof_state
@@ -233,6 +207,35 @@ class REPLToolDispatcher:
             return ToolResult(call_id, "Proof complete! All goals solved.")
 
         return ToolResult(call_id, _format_goals(list(response.goals)))
+
+    def _retry_repaired_tactic(
+        self,
+        state_id: int,
+        tactic: str,
+        error_messages: list[str],
+        goals: list[str],
+        call_id: str,
+    ) -> ToolResult | None:
+        if not _is_retryable_syntax_error(error_messages):
+            return None
+
+        repaired_tactic = _retry_with_syntax_fixer(tactic, error_messages, goals)
+        if repaired_tactic is None:
+            return None
+
+        retry_response = self.repl.apply_tactic(state_id, repaired_tactic)
+        if isinstance(retry_response, LeanError) or retry_response.has_errors():
+            return None
+
+        self.current_state_id = retry_response.proof_state
+        self.tactic_history.append(repaired_tactic)
+        self.goal_history.append(list(retry_response.goals))
+        self._sync_current_code()
+
+        if getattr(retry_response, "proof_status", "") == "Completed":
+            return ToolResult(call_id, "Proof complete! All goals solved.")
+
+        return ToolResult(call_id, _format_goals(list(retry_response.goals)))
 
     def _write_current_code(self, tool_call: ToolCall) -> ToolResult:
         new_code = str(tool_call.arguments.get("theorem_code", "")).strip()
