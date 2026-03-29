@@ -2,6 +2,24 @@
 
 from __future__ import annotations
 
+PROOF_SKETCH_SYSTEM_PROMPT = """\
+You are the LeanEcon v2 proof sketcher.
+
+Your job is to read a Lean theorem stub and produce a concise informal proof
+sketch that the prover can treat as a fixed roadmap.
+
+Rules:
+1. Do not write Lean code, tactics, or proof term syntax.
+2. Do not restate the theorem verbatim unless needed for clarity.
+3. Give a step-by-step mathematical outline with the key lemma or
+   transformation at each step.
+4. Prefer numbered steps and keep the plan tight, concrete, and linear.
+5. If the goal appears trivial, say so directly and explain why in one or two
+   steps.
+6. Do not hedge or discuss multiple alternative strategies unless the theorem
+   genuinely requires it.
+""".strip()
+
 PROVER_SYSTEM_PROMPT = """\
 You are the LeanEcon v2 prover harness.
 
@@ -68,11 +86,72 @@ Mathematical reasoning strategy — think lemma-by-lemma:
 """.strip()
 
 
-def build_prover_user_prompt(theorem_with_sorry: str) -> str:
-    """Build the user prompt for tool-mediated proof search."""
+def build_proof_sketch_user_prompt(theorem_with_sorry: str) -> str:
+   """Build the user prompt for proof-sketch generation."""
 
-    return (
-        "Current theorem stub:\n"
-        f"{theorem_with_sorry.strip()}\n\n"
-        "Use the tools to repair the file until it compiles without `sorry`."
-    )
+   return (
+      "Current theorem stub:\n"
+      f"{theorem_with_sorry.strip()}\n\n"
+      "Write an informal, step-by-step mathematical proof sketch for the theorem."
+   )
+
+
+def build_prover_user_prompt(theorem_with_sorry: str, proof_sketch: str | None = None) -> str:
+   """Build the user prompt for tool-mediated proof search."""
+
+   sketch_block = ""
+   if proof_sketch:
+      sketch_block = (
+         "Proof sketch anchor (follow this as the primary roadmap):\n"
+         f"{proof_sketch.strip()}\n\n"
+         "Use the sketch as a rigid guide. Preserve its step order unless a"
+         " local Lean constraint forces a tiny adjustment.\n\n"
+      )
+
+   return (
+      f"{sketch_block}"
+      "Current theorem stub:\n"
+      f"{theorem_with_sorry.strip()}\n\n"
+      "Use the tools to repair the file until it compiles without `sorry`."
+   )
+
+
+SYNTACTIC_FIXER_SYSTEM_PROMPT = """\
+You are the LeanEcon v2 Syntax Fixer.
+
+Your job is to repair one failed Lean tactic that looks like a syntax, parser,
+notation, or identifier typo. The corrected tactic will be applied back to the
+current REPL state immediately.
+
+Rules:
+1. Return only the corrected Lean tactic text.
+2. Do not explain your answer.
+3. Do not wrap the output in markdown fences.
+4. Do not rewrite the theorem, imports, or proof strategy.
+5. Make the smallest change that would let the tactic parse or apply cleanly.
+"""
+
+
+def build_syntax_fixer_system_prompt() -> str:
+   """Build the system prompt for the prover syntax fixer."""
+
+   return SYNTACTIC_FIXER_SYSTEM_PROMPT.strip()
+
+
+def build_syntax_fixer_user_prompt(
+   tactic: str,
+   errors: list[str],
+   goals: list[str] | None = None,
+) -> str:
+   """Build the user prompt for one tactic repair attempt."""
+
+   rendered_errors = "\n".join(errors) if errors else "No Lean diagnostics were captured."
+   parts = [
+      f"Failed tactic:\n{tactic.strip()}",
+      f"Lean errors:\n{rendered_errors}",
+   ]
+   if goals:
+      rendered_goals = "\n".join(f"- {goal}" for goal in goals)
+      parts.append(f"Current goals:\n{rendered_goals}")
+   parts.append("Return only a corrected Lean tactic that can be retried as-is.")
+   return "\n\n".join(parts).strip()

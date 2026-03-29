@@ -15,7 +15,13 @@ from src.lean import LeanREPLSession, compile_check
 from src.models import JobStatus
 from src.prover.fast_path import repl_fast_path, replace_sorry_with_tactic, suggest_fast_path_tactics
 from src.prover.file_controller import ProofFileController
-from src.prover.prompts import PROVER_SYSTEM_PROMPT, build_prover_user_prompt
+from src.prover.goal_analyst import generate_goal_analyst_hint
+from src.prover.prompts import (
+    PROOF_SKETCH_SYSTEM_PROMPT,
+    PROVER_SYSTEM_PROMPT,
+    build_proof_sketch_user_prompt,
+    build_prover_user_prompt,
+)
 from src.prover.tools import REPLToolDispatcher
 from src.prover.tool_tracker import BudgetTracker
 from src.search import search_claim
@@ -94,6 +100,64 @@ def _repl_validation_result(repl_report: dict[str, Any]) -> dict[str, Any]:
         "exit_code": 0 if success else 1,
         "source": "repl_start_proof",
     }
+
+
+async def _generate_proof_sketch(
+    driver: ProverDriver,
+    theorem_with_sorry: str,
+    on_progress: Callable[[str, dict[str, Any]], None] | None = None,
+) -> str | None:
+    """Generate a single informal proof sketch before the prover loop."""
+
+    def reject_tool_call(tool_call: ToolCall) -> ToolResult:
+        return ToolResult(
+            tool_call.id,
+            "Proof sketch generation does not use tools.",
+            is_error=True,
+        )
+
+    sketch_chunks: list[str] = []
+    try:
+        async for event in driver.prove(
+            system_prompt=PROOF_SKETCH_SYSTEM_PROMPT,
+            user_prompt=build_proof_sketch_user_prompt(theorem_with_sorry),
+            tools=[],
+            on_tool_call=reject_tool_call,
+            max_steps=1,
+        ):
+            if event.type == "assistant":
+                content = event.data.get("content") if isinstance(event.data, dict) else None
+                if isinstance(content, str) and content.strip():
+                    sketch_chunks.append(content.strip())
+                continue
+
+            if event.type == "done":
+                content = event.data.get("content") if isinstance(event.data, dict) else None
+                if isinstance(content, str) and content.strip():
+                    sketch_chunks.append(content.strip())
+                break
+
+            if event.type == "error":
+                if on_progress is not None:
+                    on_progress("proof_sketch_fallback", {"reason": str(event.data)})
+                return None
+
+            if event.type == "tool_call":
+                if on_progress is not None:
+                    on_progress(
+                        "proof_sketch_fallback",
+                        {"reason": "Proof sketch generation attempted an unexpected tool call."},
+                    )
+                return None
+    except Exception as exc:
+        if on_progress is not None:
+            on_progress("proof_sketch_fallback", {"reason": f"{type(exc).__name__}: {exc}"})
+        return None
+
+    sketch = "\n".join(chunk for chunk in sketch_chunks if chunk).strip()
+    if sketch and on_progress is not None:
+        on_progress("proof_sketch", {"sketch": sketch})
+    return sketch or None
 
 
 @dataclass
@@ -246,7 +310,11 @@ class VerificationHarness:
 
             repl_validation_check = _repl_validation_result(repl_report)
 
-        if not repl_report.get("used") or repl_report.get("fallback_reason"):
+        # --- NEW FAST-PATH BYPASS ---
+        # If the REPL is enabled and already tried the fast path, skip the slow compile fallback
+        if REPL_ENABLED and repl_report.get("used"):
+            pass 
+        elif not repl_report.get("used") or repl_report.get("fallback_reason"):
             for step, tactic in enumerate(fast_path_tactics, start=1):
                 candidate = replace_sorry_with_tactic(current_code, tactic)
                 if candidate is None:
@@ -296,6 +364,14 @@ class VerificationHarness:
                         error=None,
                     )
 
+        proof_sketch: str | None = None
+        sketch_started_at = time.perf_counter()
+        try:
+            proof_sketch = await _generate_proof_sketch(self.driver, theorem_with_sorry, on_progress)
+        finally:
+            if telemetry is not None:
+                telemetry.record_provider(sketch_started_at)
+
         repl_provider_result: JobStatus | None = None
         if repl_enabled:
             try:
@@ -304,6 +380,7 @@ class VerificationHarness:
                         job_id,
                         theorem_with_sorry,
                         on_progress,
+                        proof_sketch=proof_sketch,
                         max_steps=max_steps,
                         repl=repl,
                         telemetry=telemetry,
@@ -318,6 +395,7 @@ class VerificationHarness:
             job_id,
             theorem_with_sorry,
             on_progress,
+            proof_sketch=proof_sketch,
             max_steps=max_steps,
             telemetry=telemetry,
         )
@@ -363,6 +441,7 @@ class VerificationHarness:
         theorem_with_sorry: str,
         on_progress: Callable[[str, dict[str, Any]], None] | None,
         *,
+        proof_sketch: str | None = None,
         max_steps: int,
         repl: LeanREPLSession | None = None,
         repl_dispatcher: REPLToolDispatcher | None = None,
@@ -423,26 +502,43 @@ class VerificationHarness:
                     "apply_tactic",
                 }:
                     lean_started_at = time.perf_counter()
+                    result: ToolResult
                     try:
-                        return repl_dispatcher.handle_tool_call(tool_call)
+                        result = repl_dispatcher.handle_tool_call(tool_call)
                     finally:
                         if telemetry is not None:
                             telemetry.record_lean(lean_started_at)
+
+                    if tool_call.name == "apply_tactic" and result.is_error:
+                        context = repl_dispatcher.get_analysis_context()
+                        hint = generate_goal_analyst_hint(
+                            tactic=str(tool_call.arguments.get("tactic", "")).strip(),
+                            lean_error=result.content,
+                            goals=list(context.get("goals", [])),
+                            tactic_history=list(context.get("tactic_history", [])),
+                        )
+                        if hint:
+                            return ToolResult(
+                                tool_call.id,
+                                f"{result.content}\n\nGoal Analyst: {hint}",
+                                is_error=True,
+                            )
+                    return result
 
                 if tool_call.name == "read_current_code":
                     return ToolResult(tool_call.id, self.file_controller.read_current_code(job_id))
                 if tool_call.name == "compile_current_code":
                     current_code = self.file_controller.read_current_code(job_id)
-                    result = _timed_compile_check(
+                    compile_result = _timed_compile_check(
                         telemetry,
                         current_code,
                         filename=f"{job_id}_tool_compile.lean",
                     )
-                    return ToolResult(tool_call.id, json.dumps(result, indent=2, sort_keys=True))
+                    return ToolResult(tool_call.id, json.dumps(compile_result, indent=2, sort_keys=True))
                 if tool_call.name == "search":
                     query = str(tool_call.arguments.get("query", "")).strip()
-                    result = search_claim(query or theorem_with_sorry)
-                    return ToolResult(tool_call.id, result.model_dump_json(indent=2))
+                    search_result = search_claim(query or theorem_with_sorry)
+                    return ToolResult(tool_call.id, search_result.model_dump_json(indent=2))
                 if tool_call.name == "write_current_code":
                     new_code = str(tool_call.arguments.get("theorem_code", "")).strip()
                     if not new_code:
@@ -533,7 +629,7 @@ class VerificationHarness:
 
             async for event in self.driver.prove(
                 system_prompt=PROVER_SYSTEM_PROMPT,
-                user_prompt=build_prover_user_prompt(theorem_with_sorry),
+                user_prompt=build_prover_user_prompt(theorem_with_sorry, proof_sketch=proof_sketch),
                 tools=tools,
                 on_tool_call=on_tool_call,
                 max_steps=max_steps,

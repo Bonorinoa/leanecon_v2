@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from src.config import (
     DEFAULT_DRIVER,
+    GOAL_ANALYST_API_KEY,
+    GOAL_ANALYST_DRIVER,
+    GOAL_ANALYST_MAX_TOKENS,
+    GOAL_ANALYST_MODEL,
+    GOAL_ANALYST_TEMPERATURE,
+    GOAL_ANALYST_TIMEOUT,
     GEMINI_API_KEY,
     GEMINI_MODEL,
     MISTRAL_API_KEY,
@@ -39,4 +45,31 @@ def provider_driver_config(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+    )
+
+
+def _goal_analyst_default_model(driver_name: str) -> str:
+    if driver_name == "mistral":
+        return "open-mistral-nemo"
+    if driver_name == "gemini":
+        return "gemini-2.0-flash-lite"
+    return ""
+
+
+def goal_analyst_driver_and_config() -> tuple[str, DriverConfig]:
+    """Return the configured fast-model setup for Goal Analyst hints."""
+
+    selected_driver = GOAL_ANALYST_DRIVER or DEFAULT_DRIVER
+    provider_model, provider_api_key = provider_model_and_api_key(selected_driver)
+    model = GOAL_ANALYST_MODEL or _goal_analyst_default_model(selected_driver) or provider_model
+    api_key = GOAL_ANALYST_API_KEY or provider_api_key
+    return (
+        selected_driver,
+        DriverConfig(
+            model=model,
+            api_key=api_key,
+            temperature=GOAL_ANALYST_TEMPERATURE,
+            max_tokens=GOAL_ANALYST_MAX_TOKENS,
+            timeout=GOAL_ANALYST_TIMEOUT,
+        ),
     )

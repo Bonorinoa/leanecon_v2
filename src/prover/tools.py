@@ -2,15 +2,45 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 from lean_interact.interface import LeanError
 
+from src.config import DEFAULT_DRIVER
 from src.drivers.base import ToolCall, ToolResult
+from src.drivers.provider_config import provider_driver_config
+from src.drivers.registry import get_formalizer_driver
 from src.lean import LeanREPLSession
 from src.prover.file_controller import ProofFileController
+from src.prover.prompts import (
+    build_syntax_fixer_system_prompt,
+    build_syntax_fixer_user_prompt,
+)
+
+
+_SYNTAX_RETRY_MARKERS = (
+    "unknown identifier",
+    "unknown constant",
+    "unknown module prefix",
+    "unknown notation",
+    "invalid syntax",
+    "unexpected token",
+    "unexpected end of input",
+    "macro expected",
+    "expected ')'",
+    "expected ']'",
+    "expected '}'",
+    "expected ':='",
+    "expected term",
+    "expected expression",
+    "expected identifier",
+    "expected command",
+)
+_SYNTAX_FIXER_MAX_TOKENS = 256
 
 
 def _format_goals(goals: list[str]) -> str:
@@ -20,6 +50,77 @@ def _format_goals(goals: list[str]) -> str:
     for index, goal in enumerate(goals, start=1):
         lines.append(f"  {index}. {goal}")
     return "\n".join(lines)
+
+
+def _collect_error_messages(response: Any) -> list[str]:
+    if isinstance(response, LeanError):
+        return [response.message]
+    if hasattr(response, "get_errors"):
+        return [message.data for message in response.get_errors() if getattr(message, "data", "")]
+    return []
+
+
+def _is_retryable_syntax_error(error_messages: list[str]) -> bool:
+    lowered = "\n".join(error_messages).lower()
+    return any(marker in lowered for marker in _SYNTAX_RETRY_MARKERS)
+
+
+def _syntax_fixer_driver() -> Any | None:
+    config = provider_driver_config(
+        driver_name=DEFAULT_DRIVER,
+        temperature=0.0,
+        max_tokens=_SYNTAX_FIXER_MAX_TOKENS,
+        timeout=60.0,
+    )
+    if not config.api_key:
+        return None
+    try:
+        return get_formalizer_driver(DEFAULT_DRIVER, config)
+    except ValueError:
+        return None
+
+
+def _strip_fences(raw_output: str) -> str:
+    lines = raw_output.strip().splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _retry_with_syntax_fixer(tactic: str, error_messages: list[str], goals: list[str]) -> str | None:
+    driver = _syntax_fixer_driver()
+    if driver is None:
+        return None
+
+    system_prompt = build_syntax_fixer_system_prompt()
+    user_prompt = build_syntax_fixer_user_prompt(tactic, error_messages, goals)
+    outcome: dict[str, str | None] = {"repaired": None}
+
+    def _worker() -> None:
+        try:
+            outcome["repaired"] = asyncio.run(
+                driver.formalize(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=_SYNTAX_FIXER_MAX_TOKENS,
+                )
+            )
+        except Exception:
+            outcome["repaired"] = None
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join()
+
+    repaired = outcome["repaired"]
+    if not repaired:
+        return None
+    repaired = _strip_fences(repaired)
+    if not repaired or repaired == tactic.strip():
+        return None
+    return repaired
 
 
 @dataclass
@@ -73,14 +174,54 @@ class REPLToolDispatcher:
         state = self._current_state()
         return _format_goals(list(state.goals))
 
+    def get_analysis_context(self) -> dict[str, Any]:
+        state = self._current_state()
+        goals = list(getattr(state, "goals", []) or [])
+        if not goals and self.goal_history:
+            goals = list(self.goal_history[-1])
+        return {
+            "goals": goals,
+            "tactic_history": list(self.tactic_history),
+        }
+
     def _apply_tactic(self, call_id: str, tactic: str) -> ToolResult:
         state = self._current_state()
         response = self.repl.apply_tactic(state.state_id, tactic)
         if isinstance(response, LeanError):
-            return ToolResult(call_id, response.message, is_error=True)
+            error_messages = _collect_error_messages(response)
+            if _is_retryable_syntax_error(error_messages):
+                repaired_tactic = _retry_with_syntax_fixer(tactic, error_messages, list(state.goals))
+                if repaired_tactic is not None:
+                    retry_response = self.repl.apply_tactic(state.state_id, repaired_tactic)
+                    if not isinstance(retry_response, LeanError) and not retry_response.has_errors():
+                        self.current_state_id = retry_response.proof_state
+                        self.tactic_history.append(repaired_tactic)
+                        self.goal_history.append(list(retry_response.goals))
+                        self._sync_current_code()
+
+                        if getattr(retry_response, "proof_status", "") == "Completed":
+                            return ToolResult(call_id, "Proof complete! All goals solved.")
+
+                        return ToolResult(call_id, _format_goals(list(retry_response.goals)))
+            content = "\n".join(error_messages) if error_messages else response.message
+            return ToolResult(call_id, content, is_error=True)
         if response.has_errors():
-            errors = [message.data for message in response.get_errors()] if hasattr(response, "get_errors") else []
-            content = "\n".join(errors) if errors else f"Tactic failed: {tactic}"
+            error_messages = _collect_error_messages(response)
+            if _is_retryable_syntax_error(error_messages):
+                repaired_tactic = _retry_with_syntax_fixer(tactic, error_messages, list(state.goals))
+                if repaired_tactic is not None:
+                    retry_response = self.repl.apply_tactic(state.state_id, repaired_tactic)
+                    if not isinstance(retry_response, LeanError) and not retry_response.has_errors():
+                        self.current_state_id = retry_response.proof_state
+                        self.tactic_history.append(repaired_tactic)
+                        self.goal_history.append(list(retry_response.goals))
+                        self._sync_current_code()
+
+                        if getattr(retry_response, "proof_status", "") == "Completed":
+                            return ToolResult(call_id, "Proof complete! All goals solved.")
+
+                        return ToolResult(call_id, _format_goals(list(retry_response.goals)))
+            content = "\n".join(error_messages) if error_messages else f"Tactic failed: {tactic}"
             return ToolResult(call_id, content, is_error=True)
 
         self.current_state_id = response.proof_state
