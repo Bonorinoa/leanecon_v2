@@ -1,0 +1,25 @@
+name: LeanEcon v2 CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Build Docker Image
+      # This builds the exact environment Railway will use, including Lean and Mathlib
+      run: docker build -t leanecon-v2-test .
+
+    - name: Run Test Suite
+      # This runs your pytest suite inside the fully built container
+      # We skip the heavy LLM provider tests to keep CI fast and free
+      run: |
+        docker run leanecon-v2-test bash -c "python -m pytest tests/ -k 'not (provider or gemini or mistral)' -v"
