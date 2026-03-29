@@ -24,6 +24,8 @@ All metrics below are transcribed from the canonical JSON artifacts in `.cache/e
 
 Overall `agentic_harness`: `8/13` stubs proved, `pass@1=0.615`, latency `p50=224.928s`, `p95=310.331s`, average tool calls `10.46`.
 
+Note: this is the verified cached baseline artifact from `.cache/evals/prover_only_agentic_harness.json`. A fresh REPL-enabled rerun is still in progress and is not yet the canonical benchmark result.
+
 | Claim Set | Claims | pass@1 | Latency p50 | Latency p95 | Avg Tool Calls |
 |-----------|--------|--------|-------------|-------------|----------------|
 | tier0_smoke | 3 | 1.000 | 32.098s | 46.173s | 0.00 |

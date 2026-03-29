@@ -156,47 +156,48 @@ class VerificationHarness:
                 if on_progress:
                     on_progress("repl_fast_path_fallback", {"reason": repl_report["fallback_reason"]})
 
-        for step, tactic in enumerate(fast_path_tactics, start=1):
-            candidate = replace_sorry_with_tactic(current_code, tactic)
-            if candidate is None:
-                continue
-            self.file_controller.write_current_code(job_id, candidate)
-            self.file_controller.checkpoint(job_id, step)
-            if on_progress:
-                on_progress("fast_path_compile", {"step": step, "tactic": tactic})
-            candidate_result = compile_check(candidate, filename=f"{job_id}_fast_{step}.lean")
-            attempts.append(
-                {
-                    "step": step,
-                    "mode": "compile_check_fast_path",
-                    "tactic": tactic,
-                    "success": candidate_result["success"],
-                    "errors": candidate_result["errors"],
-                }
-            )
-            if on_progress:
-                on_progress(
-                    "fast_path",
-                    {"step": step, "tactic": tactic, "success": candidate_result["success"]},
+        if not repl_report.get("used") or repl_report.get("fallback_reason"):
+            for step, tactic in enumerate(fast_path_tactics, start=1):
+                candidate = replace_sorry_with_tactic(current_code, tactic)
+                if candidate is None:
+                    continue
+                self.file_controller.write_current_code(job_id, candidate)
+                self.file_controller.checkpoint(job_id, step)
+                if on_progress:
+                    on_progress("fast_path_compile", {"step": step, "tactic": tactic})
+                candidate_result = compile_check(candidate, filename=f"{job_id}_fast_{step}.lean")
+                attempts.append(
+                    {
+                        "step": step,
+                        "mode": "compile_check_fast_path",
+                        "tactic": tactic,
+                        "success": candidate_result["success"],
+                        "errors": candidate_result["errors"],
+                    }
                 )
-            if candidate_result["success"]:
-                return JobStatus(
-                    id=job_id,
-                    status="completed",
-                    created_at=created_at,
-                    updated_at=_utc_now(),
-                    result={
-                        "status": "verified",
-                        "theorem": theorem_name,
-                        "verified_code": candidate,
-                        "compile": candidate_result,
-                        "attempts": attempts,
-                        "repl_fast_path": repl_report,
-                        "tool_history": list(self.budget_tracker.tool_history),
-                        "tool_budget": self.budget_tracker.snapshot(),
-                    },
-                    error=None,
-                )
+                if on_progress:
+                    on_progress(
+                        "fast_path",
+                        {"step": step, "tactic": tactic, "success": candidate_result["success"]},
+                    )
+                if candidate_result["success"]:
+                    return JobStatus(
+                        id=job_id,
+                        status="completed",
+                        created_at=created_at,
+                        updated_at=_utc_now(),
+                        result={
+                            "status": "verified",
+                            "theorem": theorem_name,
+                            "verified_code": candidate,
+                            "compile": candidate_result,
+                            "attempts": attempts,
+                            "repl_fast_path": repl_report,
+                            "tool_history": list(self.budget_tracker.tool_history),
+                            "tool_budget": self.budget_tracker.snapshot(),
+                        },
+                        error=None,
+                    )
 
         repl_provider_result: JobStatus | None = None
         if REPL_ENABLED and LeanREPLSession is not None:
