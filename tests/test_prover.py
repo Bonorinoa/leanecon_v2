@@ -137,6 +137,48 @@ class SlowDriver:
         yield DriverEvent(type="done", data={"content": "should never reach here"})
 
 
+class CompileSuccessDriver:
+    """Fake driver that compiles successfully and then stalls forever."""
+
+    @property
+    def name(self) -> str:
+        return "compile_success_fake"
+
+    async def prove(self, *, system_prompt, user_prompt, tools, on_tool_call, max_steps=64):
+        import asyncio
+
+        _ = system_prompt
+        _ = user_prompt
+        _ = tools
+        _ = max_steps
+
+        write_call = ToolCall(
+            id="call_compile_1",
+            name="write_current_code",
+            arguments={
+                "theorem_code": (
+                    "import Mathlib\n\n"
+                    "theorem provider_compile_success : True := by\n"
+                    "  trivial\n"
+                )
+            },
+        )
+        yield DriverEvent(type="tool_call", data={"name": write_call.name})
+        write_result = on_tool_call(write_call)
+        yield DriverEvent(type="tool_result", data={"name": write_call.name, "content": write_result.content})
+
+        compile_call = ToolCall(id="call_compile_2", name="compile_current_code", arguments={})
+        yield DriverEvent(type="tool_call", data={"name": compile_call.name})
+        compile_result = on_tool_call(compile_call)
+        yield DriverEvent(
+            type="tool_result",
+            data={"name": compile_call.name, "content": compile_result.content},
+        )
+
+        await asyncio.sleep(3600)
+        yield DriverEvent(type="done", data={"content": "should never reach here"})
+
+
 @pytest.mark.anyio
 async def test_timeout_returns_structured_partial_result(tmp_path, monkeypatch) -> None:
     """When verification times out, the result should include structured failure data."""
@@ -182,6 +224,32 @@ async def test_timeout_returns_structured_partial_result(tmp_path, monkeypatch) 
     assert partial["stop_reason"] == "timeout"
     assert partial["tool_calls_made"] == 1
     assert partial["tool_history"] == ["read_current_code"]
+
+
+@pytest.mark.anyio
+async def test_verification_harness_short_circuits_on_successful_compile_tool(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A successful compile_current_code tool result should complete the job immediately."""
+
+    monkeypatch.setattr("src.prover.harness.suggest_fast_path_tactics", lambda _code: [])
+
+    harness = VerificationHarness(
+        driver=CompileSuccessDriver(),
+        file_controller=ProofFileController(workspace_root=tmp_path),
+        budget_tracker=BudgetTracker(),
+    )
+    result = await harness.verify(
+        "import Mathlib\n\ntheorem provider_compile_success : True := by\n  sorry\n",
+        "job_compile_success",
+        max_steps=4,
+    )
+
+    assert result.status == "completed"
+    assert result.result is not None
+    assert result.result["compile"]["success"] is True
+    assert result.result["tool_history"] == ["write_current_code", "compile_current_code"]
 
 
 @pytest.mark.anyio

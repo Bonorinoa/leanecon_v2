@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
-from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -89,15 +89,28 @@ def log_line(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def job_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the structured job result payload when present."""
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        return result
+    return {}
+
+
+def job_progress_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the structured progress payload for one job poll response."""
+
+    progress = job_result_payload(payload).get("progress")
+    if isinstance(progress, dict):
+        return progress
+    return {}
+
+
 def _job_signature(payload: dict[str, Any]) -> tuple[Any, ...]:
     """Return a compact signature used to suppress duplicate job logs."""
 
-    result = payload.get("result")
-    progress: dict[str, Any] = {}
-    if isinstance(result, dict):
-        maybe_progress = result.get("progress")
-        if isinstance(maybe_progress, dict):
-            progress = maybe_progress
+    progress = job_progress_payload(payload)
 
     return (
         payload.get("status"),
@@ -115,17 +128,14 @@ def job_progress_line(payload: dict[str, Any]) -> str:
     """Render a job payload as a compact, readable status line."""
 
     parts = [f"status={one_line(payload.get('status', 'unknown'))}"]
-    result = payload.get("result")
-    if isinstance(result, dict):
-        progress = result.get("progress")
-        if isinstance(progress, dict):
-            stage = progress.get("stage")
-            if stage is not None:
-                parts.append(f"stage={one_line(stage)}")
-            for key in ("step", "tactic", "success", "event_type", "tool_calls_made", "data"):
-                value = progress.get(key)
-                if value is not None:
-                    parts.append(f"{key}={one_line(value)}")
+    progress = job_progress_payload(payload)
+    stage = progress.get("stage")
+    if stage is not None:
+        parts.append(f"stage={one_line(stage)}")
+    for key in ("step", "tactic", "success", "event_type", "tool_calls_made", "data"):
+        value = progress.get(key)
+        if value is not None:
+            parts.append(f"{key}={one_line(value)}")
     error = payload.get("error")
     if error:
         parts.append(f"error={one_line(error, limit=120)}")
@@ -227,6 +237,76 @@ def frequency_table(values: list[str]) -> dict[str, int]:
     for value in values:
         counts[value] = counts.get(value, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _int_or_none(value: Any) -> int | None:
+    """Return an integer value when the input can be losslessly normalized."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def extract_tool_budget(result: dict[str, Any]) -> dict[str, int | None]:
+    """Normalize tool-budget data from one terminal verify result."""
+
+    tool_budget = result.get("tool_budget")
+    if not isinstance(tool_budget, dict):
+        tool_budget = {}
+
+    tool_history = result.get("tool_history")
+    tool_history_count = len(tool_history) if isinstance(tool_history, list) else None
+    total_tool_calls = (
+        _int_or_none(result.get("tool_calls_made"))
+        or _int_or_none(tool_budget.get("total_tool_calls"))
+        or tool_history_count
+    )
+
+    return {
+        "tool_calls_made": total_tool_calls,
+        "max_total_tool_calls": _int_or_none(tool_budget.get("max_total_tool_calls")),
+        "max_search_tool_calls": _int_or_none(tool_budget.get("max_search_tool_calls")),
+        "search_tool_calls": _int_or_none(tool_budget.get("search_tool_calls")),
+    }
+
+
+def classify_job_error(status: str, result: dict[str, Any]) -> str | None:
+    """Map heterogeneous job failures into stable dashboard error buckets."""
+
+    stop_reason = result.get("stop_reason")
+    if stop_reason == "timeout":
+        return "timeout"
+    if stop_reason == "exception":
+        return "exception"
+    if status == "skipped":
+        return "skipped"
+    if status != "failed":
+        return None
+
+    compile_payload = result.get("compile")
+    if isinstance(compile_payload, dict) and compile_payload.get("errors"):
+        return "compile_error"
+    return "verification_failed"
+
+
+def summarize_tool_budget(
+    tool_calls_made: list[int],
+    *,
+    max_total_tool_calls: int | None,
+    max_search_tool_calls: int | None,
+) -> dict[str, float | int | None]:
+    """Summarize tool-budget usage for one eval run."""
+
+    return {
+        "max_total_tool_calls": max_total_tool_calls,
+        "max_search_tool_calls": max_search_tool_calls,
+        "mean_tool_calls_made": float(mean(tool_calls_made)) if tool_calls_made else None,
+        "max_tool_calls_made": max(tool_calls_made) if tool_calls_made else None,
+    }
 
 
 def default_output_path(runner_name: str, claim_set: str) -> Path:

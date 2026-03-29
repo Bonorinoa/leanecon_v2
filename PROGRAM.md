@@ -98,5 +98,15 @@ full eval run. The change must be:
 - Theorem-stub verify: pass@1 = 1.000
 - Raw-claim end-to-end: pass@1 = 0.333
 - Latency p50: ~228s, p95: ~267s (end-to-end)
+- V2 (2026-03-28) formalizer-only tier0_smoke: pass@1 = 1.000, latency p50 = 0.006s, p95 = 0.008s
+- V2 (2026-03-28) formalizer-only tier1_core: pass@1 = 1.000, latency p50 = 0.006s, p95 = 0.007s
+- V2 (2026-03-28) formalizer-only tier2_frontier: pass@1 = 1.000, latency p50 = 0.005s, p95 = 0.006s
+- V2 (2026-03-28) prover-only tier0_smoke: pass@1 = 1.000, latency p50 = 32.098s, p95 = 46.173s
+- V2 (2026-03-28) prover-only agentic_harness overall: pass@1 = 0.615 (8/13), latency p50 = 224.928s, p95 = 310.331s, avg tool calls = 10.46
+- V2 (2026-03-28) prover-only agentic_harness provable split: pass@1 = 0.800 (8/10), latency p50 = 212.721s, p95 = 311.433s, avg tool calls = 9.50
+- V2 (2026-03-28) prover-only agentic_harness negative split: pass@1 = 0.000 (0/3), latency p50 = 300.123s, p95 = 305.367s, avg tool calls = 13.67
+- V2 (2026-03-28) raw-claim end-to-end tier0_smoke: pass@1 = 0.333 (1/3), latency p50 = 305.802s, p95 = 311.818s
+- V2 (2026-03-28) raw-claim end-to-end agentic_harness: pass@1 = 0.615 (8/13), latency p50 = 247.744s, p95 = 335.694s
+- V2 (2026-03-28) end-to-end negative controls on agentic_harness: 1/3 verified because `ag_neg_wrong_demand` was weakened during formalization
 
 V2 targets: improve raw-claim end-to-end pass@1 to ≥0.667 within 2 weeks.

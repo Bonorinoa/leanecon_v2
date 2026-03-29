@@ -18,11 +18,9 @@ from src.config import (
     DEFAULT_DRIVER,
     EVAL_CLAIMS_DIR,
     FORMALIZE_TEMPERATURE,
-    MISTRAL_API_KEY,
-    MISTRAL_MODEL,
     PROVE_TEMPERATURE,
 )
-from src.drivers.base import DriverConfig
+from src.drivers.provider_config import provider_driver_config
 from src.drivers.registry import get_formalizer_driver, get_prover_driver
 from src.explainer import explain_verification_result_async
 from src.formalizer import formalize_claim
@@ -77,9 +75,8 @@ def _health_payload() -> HealthResponse:
 def _formalizer_driver():
     return get_formalizer_driver(
         DEFAULT_DRIVER,
-        DriverConfig(
-            model=MISTRAL_MODEL,
-            api_key=MISTRAL_API_KEY,
+        provider_driver_config(
+            driver_name=DEFAULT_DRIVER,
             temperature=FORMALIZE_TEMPERATURE,
         ),
     )
@@ -88,9 +85,8 @@ def _formalizer_driver():
 def _prover_driver():
     return get_prover_driver(
         DEFAULT_DRIVER,
-        DriverConfig(
-            model=MISTRAL_MODEL,
-            api_key=MISTRAL_API_KEY,
+        provider_driver_config(
+            driver_name=DEFAULT_DRIVER,
             temperature=PROVE_TEMPERATURE,
         ),
     )

@@ -289,6 +289,32 @@ class VerificationHarness:
             attempts.append({"event": event.type, "data": event.data})
             if on_progress:
                 on_progress("provider", {"event_type": event.type, "data": event.data})
+            if event.type == "tool_result" and isinstance(event.data, dict):
+                if event.data.get("name") == "compile_current_code":
+                    content = event.data.get("content")
+                    if isinstance(content, str):
+                        try:
+                            compile_result = json.loads(content)
+                        except json.JSONDecodeError:
+                            compile_result = None
+                        if isinstance(compile_result, dict) and compile_result.get("success"):
+                            current_code = self.file_controller.read_current_code(job_id)
+                            return JobStatus(
+                                id=job_id,
+                                status="completed",
+                                created_at=created_at,
+                                updated_at=_utc_now(),
+                                result={
+                                    "status": "verified",
+                                    "theorem": theorem_name,
+                                    "verified_code": current_code,
+                                    "compile": compile_result,
+                                    "attempts": attempts,
+                                    "tool_history": list(self.budget_tracker.tool_history),
+                                    "tool_budget": self.budget_tracker.snapshot(),
+                                },
+                                error=None,
+                            )
             if event.type == "error":
                 driver_failed = True
                 driver_error = str(event.data)

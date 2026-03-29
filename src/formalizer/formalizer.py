@@ -10,10 +10,9 @@ from src.config import (
     DEFAULT_DRIVER,
     FORMALIZE_TEMPERATURE,
     MAX_FORMALIZE_ATTEMPTS,
-    MISTRAL_API_KEY,
-    MISTRAL_MODEL,
 )
-from src.drivers.base import DriverConfig, FormalizerDriver
+from src.drivers.base import FormalizerDriver
+from src.drivers.provider_config import provider_driver_config
 from src.drivers.registry import get_formalizer_driver
 from src.formalizer.prompts import (
     build_formalize_system_prompt,
@@ -222,16 +221,13 @@ def _repair_candidate(raw_claim: str, theorem_code: str, context: FormalizationC
 
 
 def _provider_driver() -> FormalizerDriver | None:
-    if not MISTRAL_API_KEY:
-        return None
-    return get_formalizer_driver(
-        DEFAULT_DRIVER,
-        DriverConfig(
-            model=MISTRAL_MODEL,
-            api_key=MISTRAL_API_KEY,
-            temperature=FORMALIZE_TEMPERATURE,
-        ),
+    config = provider_driver_config(
+        driver_name=DEFAULT_DRIVER,
+        temperature=FORMALIZE_TEMPERATURE,
     )
+    if not config.api_key:
+        return None
+    return get_formalizer_driver(DEFAULT_DRIVER, config)
 
 
 def _compile_errors(compile_result: dict[str, Any]) -> list[str]:

@@ -55,8 +55,6 @@ def test_job_store_lifecycle_and_counts(tmp_path) -> None:
 def test_job_store_fail_with_structured_result(tmp_path) -> None:
     """Failing a job with a result dict should persist and publish structured data."""
 
-    import asyncio
-
     store = JobStore(db_path=tmp_path / "jobs.db")
     job = store.create({"kind": "verify"})
     store.start(job.id)
